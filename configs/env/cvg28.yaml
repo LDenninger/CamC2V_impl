@@ -1,0 +1,8 @@
+hostname: denninge@cvg28
+experiment_directory: /home/denninge/CamC2V/results
+source_directory: /home/denninge/CamC2V
+account: denninge
+run_time: "24:00:00"
+partition: gpu
+cpus_per_task: 8
+mem_per_cpu: 8

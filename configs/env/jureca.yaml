@@ -1,0 +1,8 @@
+hostname: denninger1@jureca.fz-juelich.de
+experiment_directory: /p/project1/westai0081/experiments_new
+source_directory: /p/project1/westai0081/src/CamC2V
+account: westai0081
+run_time: "24:00:00"
+partition: dc-hwai
+cpus_per_task: 8
+mem_per_cpu: 8

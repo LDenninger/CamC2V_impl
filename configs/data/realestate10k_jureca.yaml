@@ -1,0 +1,31 @@
+target: utils_data.DataModuleFromConfig
+params:
+  batch_size: 1
+  num_workers: 4
+  wrap: false
+  validation_max_n_samples: 256
+  use_custom_collate: true
+  train:
+    target: data.realestate10k.RealEstate10K
+    params:
+      data_dir: /p/project1/westai0081/data/realestate10k_new/video_clips/train
+      meta_path: /p/project1/westai0081/data/realestate10k_new/valid_metadata/train
+      meta_list: /p/project1/westai0081/data/realestate10k_own/train_valid_list.txt
+      caption_file: /p/project1/westai0081/data/realestate10k_own/train_captions.json
+      video_length: 16
+      frame_stride: [1, 10]
+      resolution: [ 256, 256 ]
+      additional_cond_frames: random_full
+      num_additional_cond_frames: [1, 4]
+  validation:
+    target: data.realestate10k.RealEstate10K
+    params:
+      data_dir: /p/project1/westai0081/data/realestate10k_new/video_clips/test
+      meta_path: /p/project1/westai0081/data/realestate10k_new/valid_metadata/test
+      meta_list: /p/project1/westai0081/data/realestate10k_own/test_valid_list.txt
+      caption_file: /p/project1/westai0081/data/realestate10k_own/test_captions.json
+      video_length: 16
+      frame_stride: 8
+      resolution: [ 256, 256 ]
+      additional_cond_frames: random_full
+      num_additional_cond_frames: [1, 4]

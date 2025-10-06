@@ -1,0 +1,8 @@
+hostname: s6ludenn_hpc@marvin.hpc.uni-bonn.de
+experiment_directory: /lustre/mlnvme/data/s6ludenn_hpc-camcontexti2v/experiments_new
+source_directory: /home/s6ludenn_hpc/CamC2V
+account: ag_ifi_gall
+run_time: "24:00:00"
+partition: sgpu_medium
+cpus_per_task: 8
+mem_per_cpu: 8

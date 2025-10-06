@@ -1,0 +1,14 @@
+.DS_Store
+*pyc
+.vscode
+__pycache__
+*.egg-info
+
+ckpts
+checkpoints
+results
+results
+backup
+LOG
+
+output/

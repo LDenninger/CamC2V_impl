@@ -1,0 +1,14 @@
+machine: cvg28
+run_name: debug
+debug: false
+override: false
+schedule: false
+dependency: null
+logger: csv
+checkpoint: null
+
+defaults:
+  - data: realestate10k_cvg28
+  - model: camc2v_base
+  - env: cvg28
+  - lightning: cvg28
