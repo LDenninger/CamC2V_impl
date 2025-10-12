@@ -3,7 +3,7 @@ from inspect import isfunction
 import torch
 from torch import nn
 import torch.distributed as dist
-
+from torch.utils.checkpoint import checkpoint as torch_ckpt
 
 def gather_data(data, return_np=True):
     ''' gather data from multiple processes to one list '''
@@ -77,7 +77,7 @@ def init_(tensor):
     tensor.uniform_(-std, std)
     return tensor
 
-ckpt = torch.utils.checkpoint.checkpoint
+ckpt = torch_ckpt
 def checkpoint(func, inputs, params, flag):
     """
     Evaluate a function without caching intermediate activations, allowing for

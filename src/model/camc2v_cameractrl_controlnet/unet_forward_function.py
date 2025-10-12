@@ -26,12 +26,12 @@ mainlogger = logging.getLogger('mainlogger')
 
 # add RT input to forward of unet
 def new_forward_for_unet(self, x, timesteps, context=None, features_adapter=None, fs=None, camera_condition=None,
-                         additional_condition=None, **kwargs):
+                         additional_condition=None, context_add=None, context_mask=None, **kwargs):
     """
         camera_condition (dict): ["pluker_embedding_feautres", "sample_locs_dict", "cond_frame_index", "add_type"]
     """
     condition_input = torch.concatenate([x[:,:4], additional_condition], dim=1)
-    hs_context, *_ = self.context_encoder(x, condition_input, timesteps=timesteps, context=context,)
+    hs_context, *_ = self.context_encoder(x, condition_input, timesteps=timesteps, context_add=context_add, context=context, mask=context_mask)
 
     #import ipdb; ipdb.set_trace()
     b, _, t, _, _ = x.shape

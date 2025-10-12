@@ -2,7 +2,7 @@ from functools import partial
 from abc import abstractmethod
 import torch
 import torch.nn as nn
-from einops import rearrange
+from einops import rearrange, repeat
 import torch.nn.functional as F
 import os, sys
 print(os.getcwd())
@@ -17,7 +17,7 @@ from lvdm.basics import (
     avg_pool_nd,
     normalization
 )
-from lvdm.modules.attention import SpatialTransformer, TemporalTransformer
+from lvdm.modules.attention import SpatialTransformer, TemporalTransformer, BasicTransformerBlock
 
 
 class TimestepBlock(nn.Module):
@@ -49,12 +49,16 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     Also routes context to (Spatial|Temporal)Transformer layers, and reshapes for
     temporal transformers when needed.
     """
-    def forward(self, x, emb, context=None, batch_size=None):
+    def forward(self, x, emb, context=None, context_add=None, batch_size=None):
         for layer in self:
             if isinstance(layer, TimestepBlock):
                 x = layer(x, emb, batch_size=batch_size)
             elif isinstance(layer, SpatialTransformer):
                 x = layer(x, context)
+            elif isinstance(layer, CrossTransformer):
+                t = x.shape[0] // batch_size
+                context_add = repeat(context_add, 'b c n h w -> (b t) c n h w', t=t)
+                x = layer(x, context_add)
             elif isinstance(layer, TemporalTransformer):
                 # (bt, c, h, w) -> (b, c, t, h, w) for temporal attention
                 x = rearrange(x, '(b f) c h w -> b c f h w', b=batch_size)
@@ -250,6 +254,72 @@ class TemporalConvBlock(nn.Module):
         x = self.conv3(x)
         x = self.conv4(x)
         return identity + x
+    
+class CrossTransformer(nn.Module):
+    """
+    Transformer block for image-like data in spatial axis.
+    First, project the input (aka embedding)
+    and reshape to b, t, d.
+    Then apply standard transformer action.
+    Finally, reshape to image
+    NEW: use_linear for more efficiency instead of the 1x1 convs
+    """
+
+    def __init__(self, in_channels, n_heads, d_head, depth=1, dropout=0., context_dim=None,
+                 use_checkpoint=True, disable_self_attn=False, use_linear=False, video_length=None,
+                 image_cross_attention=False, image_cross_attention_scale_learnable=False, is_output_block=False, ds=1):
+        super().__init__()
+        self.ds = ds
+        self.in_channels = in_channels
+        inner_dim = n_heads * d_head
+        self.norm = torch.nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
+        if not use_linear:
+            self.proj_in = nn.Conv2d(in_channels, inner_dim, kernel_size=1, stride=1, padding=0)
+        else:
+            self.proj_in = nn.Linear(in_channels, inner_dim)
+
+        attention_cls = None
+        self.is_output_block = is_output_block
+        self.transformer_blocks = nn.ModuleList([
+            BasicTransformerBlock(
+                inner_dim,
+                n_heads,
+                d_head,
+                dropout=dropout,
+                context_dim=context_dim,
+                disable_self_attn=disable_self_attn,
+                checkpoint=use_checkpoint,
+                attention_cls=attention_cls,
+                video_length=video_length,
+                image_cross_attention=image_cross_attention,
+                image_cross_attention_scale_learnable=image_cross_attention_scale_learnable,
+                ) for d in range(depth)
+        ])
+        if not use_linear:
+            self.proj_out = zero_module(nn.Conv2d(inner_dim, in_channels, kernel_size=1, stride=1, padding=0))
+        else:
+            self.proj_out = zero_module(nn.Linear(inner_dim, in_channels))
+        self.use_linear = use_linear
+
+
+    def forward(self, x, context=None, **kwargs):
+        b, c, h, w = x.shape
+        x_in = x
+        x = self.norm(x)
+        if not self.use_linear:
+            x = self.proj_in(x)
+        x = rearrange(x, 'b c h w -> b (h w) c').contiguous()
+        context = rearrange(context, 'b c n h w -> b (n h w) c').contiguous()
+        if self.use_linear:
+            x = self.proj_in(x)
+        for i, block in enumerate(self.transformer_blocks):
+            x = block(x, context=context, **kwargs)
+        if self.use_linear:
+            x = self.proj_out(x)
+        x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w).contiguous()
+        if not self.use_linear:
+            x = self.proj_out(x)
+        return x + x_in
 
 
 class ContextEncoder(nn.Module):
@@ -278,9 +348,11 @@ class ContextEncoder(nn.Module):
                  attention_resolutions,
                  dropout=0.0,
                  channel_mult=(1, 2, 4, 8),
+                 output_mask_resolutions=[(32,32), (16,16)],
                  conv_resample=True,
                  dims=2,
                  context_dim=None,
+                 context_add_dim=None,
                  use_scale_shift_norm=False,
                  resblock_updown=False,
                  num_heads=-1,
@@ -332,6 +404,7 @@ class ContextEncoder(nn.Module):
         self.fs_condition = fs_condition
         self.layer_fusion_strategy = layer_fusion_strategy  # not used in encoder
         self.activation_ckpt = activation_ckpt
+        self.output_mask_resolutions = output_mask_resolutions
 
         # Time embedding (and optional FPS conditioning)
         self.time_embed = nn.Sequential(
@@ -406,6 +479,18 @@ class ContextEncoder(nn.Module):
                             is_output_block=False, ds=ds
                         )
                     )
+                    if context_add_dim is not None:
+                        layers.append(
+                            CrossTransformer(
+                                ch, num_heads, dim_head,
+                                depth=transformer_depth, context_dim=context_add_dim, use_linear=use_linear,
+                                use_checkpoint=use_checkpoint, disable_self_attn=True,
+                                video_length=temporal_length, image_cross_attention=self.image_cross_attention,
+                                image_cross_attention_scale_learnable=self.image_cross_attention_scale_learnable,
+                                is_output_block=False, ds=ds
+                            )
+                        )
+
                     if self.temporal_attention:
                         layers.append(
                             TemporalTransformer(
@@ -521,11 +606,12 @@ class ContextEncoder(nn.Module):
             timesteps,
             mask=None,
             context=None,
+            context_add=None,
             features_adapter=None,
             fs=None,
             **kwargs):
-        
-        return checkpoint(self._forward, (x, condition, timesteps, mask, context, features_adapter, fs), self.parameters(), self.activation_ckpt)
+
+        return checkpoint(self._forward, (x, condition, timesteps, mask, context, context_add, features_adapter, fs), self.parameters(), self.activation_ckpt)
 
     def _forward(self, 
                 x, 
@@ -533,6 +619,7 @@ class ContextEncoder(nn.Module):
                 timesteps,
                 mask=None,
                 context=None,
+                context_add=None,
                 features_adapter=None,
                 fs=None,
                 **kwargs):
@@ -557,6 +644,15 @@ class ContextEncoder(nn.Module):
         if self.input_zero_convolution is not None:
             condition = self.input_zero_convolution(condition)
         x = x + condition
+
+        output_mask_map = {}
+        if mask is not None:
+            for res in self.output_mask_resolutions:
+                mask_ds = torch.nn.functional.interpolate(rearrange(mask, "B 1 T H W -> (B T) 1 H W"), size=res, mode="nearest")
+                #mask_ds = rearrange(mask_ds, "(B T) 1 H W -> (B T) 1 H W", B=b)
+                #import ipdb; ipdb.set_trace()
+                output_mask_map[res] = mask_ds
+
 
         # time embedding
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False).type(x.dtype)
@@ -585,7 +681,7 @@ class ContextEncoder(nn.Module):
         hs = []
         adapter_idx = 0
         for block_id, module in enumerate(self.input_blocks):
-            h = module(h, emb, context=context, batch_size=b)
+            h = module(h, emb, context=context, context_add=context_add, batch_size=b)
             if block_id == 0 and self.addition_attention:
                 h = self.init_attn(h, emb, context=context, batch_size=b)
 
@@ -594,7 +690,6 @@ class ContextEncoder(nn.Module):
                 h = h + features_adapter[adapter_idx]
                 adapter_idx += 1
             hs.append(h)
-
         if features_adapter is not None:
             assert len(features_adapter) == adapter_idx, 'Wrong features_adapter'
 
@@ -608,11 +703,12 @@ class ContextEncoder(nn.Module):
                 hs[i] = rearrange(hs[i], '(b t) c h w -> b c t h w', b=b)
                 hs[i] = zero_conv(hs[i])
                 hs[i] = rearrange(hs[i], 'b c t h w -> (b t) c h w')
+        if mask is not None:
+            for h in hs:
+                if h.shape[-2:] in output_mask_map:
+                    h = h * output_mask_map[h.shape[-2:]]
            
-            if mask is not None:
-                mask = rearrange(mask, 'b 1 t h w -> (b t) 1 h w')
-                for i, hs_ in enumerate(hs):
-                    hs[i] = hs_ * mask
+        
 
         return hs, self.input_ds
 
@@ -620,6 +716,8 @@ class ContextEncoder(nn.Module):
 if __name__ == '__main__':
     from VidUtil.debug import inspect
     from VidUtil.torch_utils import model_summary
+
+    USE_CROSS_TRANSFORMER = True
 
     context_encoder_config = {
         "in_channels": 8,
@@ -632,6 +730,7 @@ if __name__ == '__main__':
         "num_head_channels": 64,
         "transformer_depth": 1,
         "context_dim": 1024,
+        "context_add_dim": 4 if USE_CROSS_TRANSFORMER else None,
         "use_linear": True,
         "use_checkpoint": False,
         "temporal_conv": True,
@@ -652,12 +751,13 @@ if __name__ == '__main__':
     model_summary(context_encoder)
 
     dummy_x = torch.randn(2, 8, 16, 32, 32).to('cuda')
+    dummy_c_add = torch.randn(2, 4, 5, 32, 32).to('cuda')
     dummy_t = torch.randint(0, 1000, (2,)).to('cuda')
     dummy_c = torch.randn(2, 77 + 16 * 16, 1024).to('cuda')
     dummy_fs = torch.tensor([3, 6]).to('cuda')
     #dummy_mask = torch.randn(2, 1, 16, 32, 32).to('cuda')
 
-    out = context_encoder(dummy_x, dummy_x, dummy_t, context=dummy_c)
+    out = context_encoder(dummy_x, dummy_x, dummy_t, context=dummy_c, context_add=dummy_c_add if USE_CROSS_TRANSFORMER==True else None)
 
     print('Context encoder output:')
     inspect(out)

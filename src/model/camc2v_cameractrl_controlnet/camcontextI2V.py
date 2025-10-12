@@ -27,6 +27,7 @@ from model.camc2v_cameractrl_controlnet.multicondi2v_modified_modules import (
 from model.camc2v_cameractrl_controlnet.unet_forward_function import new_forward_for_unet
 from model.camc2v_cameractrl_controlnet.epipolar import Epipolar, EpipolarCrossAttention, pix2coord, VisualCrossAttention
 from model.cache3d.cache3d_mvsplat import MvSplatCache3D
+from model.cache3d.cache3d_pc import Cache3DPCD
 from utils.utils import instantiate_from_config
 from lvdm.common import extract_into_tensor, default
 
@@ -80,6 +81,7 @@ class CamContext2Video(CameraControlLVDM):
                     first_unet_block_trainable: bool = False,
                     context_encoder_trainable: bool = False,
                     diffusion_model_trainable: bool = False,
+                    use_cache3d_mask: bool = False,
                     diffusion_model_trainable_param_list: list = [],
                     first_unet_block_freeze_steps: int = 0,
                     zero_convolution: bool = True,
@@ -106,12 +108,15 @@ class CamContext2Video(CameraControlLVDM):
         self.use_pose_embedding_in_latent_adaptor = use_pose_embedding_in_latent_adaptor
         self.use_zero_convolution = zero_convolution
         self.use_semantic_branch = use_semantic_branch
+        self.use_cache3d_mask = use_cache3d_mask
         self.cache3d_config = cache3d
         self.visual_cross_attn_config = visual_cross_attn_config
         self.ground_truth_debug_mode = ground_truth_debug_mode
+        self.has_context_encoder_crossattn = context_encoder_config["params"].get("context_add_dim", None) is not None
         
         # Multi conditioning
         self.cache3d = instantiate_from_config(self.cache3d_config) if self.cache3d_config is not None else None
+        self.cache3d._return_mask = self.use_cache3d_mask
         context_encoder = instantiate_from_config(context_encoder_config) if context_encoder_config is not None else None
         #self.zero_convolution = None
         #self.multi_latent_supervision_loss_scale = multi_latent_supervision_loss_scale
@@ -214,7 +219,7 @@ class CamContext2Video(CameraControlLVDM):
                     return_cond_frame_index=False, return_cond_frame=False, return_original_input=False, rand_cond_frame=None,
                     enable_camera_condition=True, return_camera_data=False, return_video_path=False, return_depth_scale=False,
                     trace_scale_factor=1.0, cond_frame_index=None, return_presampled_timestep=False, return_cache3d_rendering=False, 
-                    return_additional_condition=False, **kwargs):
+                    return_cache3d_mask = False, return_additional_condition=False, return_context_add=False, **kwargs):
         
         ## Retrieve input data ##
         ## x: b c t h w
@@ -242,7 +247,7 @@ class CamContext2Video(CameraControlLVDM):
 
         ## Compute the context condition frames using the 3D Cache ##
         if not self.ground_truth_debug_mode:
-            rendered_cond_frames = self.get_cache3d_rendering(batch)
+            rendered_cond_frames, cache3d_mask = self.get_cache3d_rendering(batch)
             rendered_cond_frames = rearrange(rendered_cond_frames, "B T C H W -> B C T H W ")
             #import ipdb; ipdb.set_trace()
             x = torch.cat([x, rendered_cond_frames], dim=2)
@@ -254,8 +259,20 @@ class CamContext2Video(CameraControlLVDM):
             cond_frames = rearrange(cond_frames, "B T H W C -> B C T H W ")
             rendered_cond_frames = rearrange(rendered_cond_frames, "B C T H W -> B T C H W ")
 
+        ## Prepare the raw additinoal context frames
+        if return_context_add:
+            img_ref = super().get_input(batch, 'video')[:,:,0].float().unsqueeze(1) # [B, 1, C, H, W]
+            images = super().get_input(batch, 'cond_frames').float()
+            context_add = torch.cat([img_ref, images], dim=1) # [B, F, C, H, W]
+            context_add = rearrange(context_add, "B T C H W -> B C T H W ")
+            x = torch.cat([x, context_add], dim=2)
+
         ## Encode to latent space ##
         z = self.encode_first_stage(x)
+
+        ## Cut out the additional context frames
+        if return_context_add:
+            z_context_add = z[:,:,-(cond_frames.shape[2]-1):]
 
         ## Cut out additional condition from latents ""
         if self.ground_truth_debug_mode:
@@ -335,6 +352,10 @@ class CamContext2Video(CameraControlLVDM):
             out.append(fs)
         if return_additional_condition:
             out.append(additional_condition)
+        if return_context_add:
+            out.append(z_context_add)
+        if return_cache3d_mask:
+            out.append(cache3d_mask)
         if return_cond_frame_index:
             out.append(cond_frame_index)
         if return_cond_frame:
@@ -364,37 +385,77 @@ class CamContext2Video(CameraControlLVDM):
 
     @torch.autocast(device_type="cuda", enabled=False)
     def get_cache3d_rendering(self, batch):
-  
-        _cond_frame_avail = 'cond_frames' in batch and batch['cond_frames'] is not None
-        if not _cond_frame_avail:
-            return repeat(batch['video'][:,:,0], "B C H W -> B C T H W", T=16)  # [B, C, T, H, W]
-        
-        intrinsics = batch["camera_intrinsics"].float()
-        intrinsics = _norm_intrinsic(intrinsics).float()
-        extrinsics = np.linalg.inv(batch["RT_np"])
+        mask = None 
+        if isinstance(self.cache3d, MvSplatCache3D):
+            _cond_frame_avail = 'cond_frames' in batch and batch['cond_frames'] is not None
+            if not _cond_frame_avail:
+                return repeat(batch['video'][:,:,0], "B C H W -> B C T H W", T=16)  # [B, C, T, H, W]
+            
+            intrinsics = batch["camera_intrinsics"].float()
+            intrinsics = _norm_intrinsic(intrinsics).float()
+            extrinsics = np.linalg.inv(batch["RT_np"])
 
-        intrinsics_cond = batch["camera_intrinsics_cond"].float()
-        intrinsics_cond = _norm_intrinsic(intrinsics_cond).float()
-        intrinsics_cond = torch.cat([intrinsics[:,0:1], intrinsics_cond], dim=1).float()
+            intrinsics_cond = batch["camera_intrinsics_cond"].float()
+            intrinsics_cond = _norm_intrinsic(intrinsics_cond).float()
+            intrinsics_cond = torch.cat([intrinsics[:,0:1], intrinsics_cond], dim=1).float()
 
-        extrinsics_cond = np.concatenate([extrinsics[:,0:1], np.linalg.inv(batch["RT_cond_np"])], axis=1)
+            extrinsics_cond = np.concatenate([extrinsics[:,0:1], np.linalg.inv(batch["RT_cond_np"])], axis=1)
 
-        img_ref = ((batch['video'][:,:,0] +1.)/2.).float().unsqueeze(1) # [B, 1, C, H, W]
-        images = ((batch['cond_frames']+1.)/2.).float()
-        images = torch.cat([img_ref, images], dim=1) # [B, F, C, H, W]
-        self.cache3d.update(images, extrinsics_cond, intrinsics_cond)
+            img_ref = ((batch['video'][:,:,0] +1.)/2.).float().unsqueeze(1) # [B, 1, C, H, W]
+            images = ((batch['cond_frames']+1.)/2.).float()
+            images = torch.cat([img_ref, images], dim=1) # [B, F, C, H, W]
+            self.cache3d.update(images, extrinsics_cond, intrinsics_cond)
 
-        #gaussian_vis = self.cache3d.get_debug_views(images)
-        #gaussian_vis = (gaussian_vis - gaussian_vis.min()) / (gaussian_vis.max() - gaussian_vis.min())
-        #gaussian_vis = rearrange(gaussian_vis, "B C H W -> B H W C").cpu().numpy()
-        #gaussian_vis = (gaussian_vis*255).astype(np.uint8)
-        #Image.fromarray(gaussian_vis[0]).save("gaussian_vis.png")
+            rendered_cond_frames = self.cache3d.render(extrinsics, intrinsics) # [B, F, C, H, W]
+            rendered_cond_frames = torch.minimum(rendered_cond_frames, torch.ones(1).to(rendered_cond_frames.device))*2. - 1.
+            self.cache3d.reset()
 
-        rendered_cond_frames = self.cache3d.render(extrinsics, intrinsics) # [B, F, C, H, W]
-        rendered_cond_frames = torch.minimum(rendered_cond_frames, torch.ones(1).to(rendered_cond_frames.device))*2. - 1.
-        self.cache3d.reset()
+            return rendered_cond_frames
+        elif isinstance(self.cache3d, Cache3DPCD):
+            #import ipdb; ipdb.set_trace()
+            _cond_frame_avail = 'cond_frames' in batch and batch['cond_frames'] is not None
+            if not _cond_frame_avail:
+                return repeat(batch['video'][:,:,0], "B C H W -> B C T H W", T=16)  # [B, C, T, H, W]
+            ## Target extrinsics and intrinsics
+            intrinsics = super().get_input(batch, "camera_intrinsics_depth").float()
+            extrinsics = batch["RT_depth"]
+            ## Source extrinsics and intrinsics
+            intrinsics_cond = super().get_input(batch, "camera_intrinsics_depth_cond").float()
+            #intrinsics_cond = _norm_intrinsic(intrinsics_cond).float()
+            intrinsics_cond = torch.cat([intrinsics[:,0:1], intrinsics_cond], dim=1).float()
+            extrinsics_cond = torch.concatenate([extrinsics[:,0:1], batch["RT_depth_cond"]], axis=1)
+            ## Source images
+            img_ref = ((batch['video'][:,:,0] +1.)/2.).float().unsqueeze(1) # [B, 1, C, H, W]
+            images = ((batch['cond_frames']+1.)/2.).float()
+            images = torch.cat([img_ref, images], dim=1) # [B, F, C, H, W]
+            ## Source depth maps
+            depth_maps = batch["depth_maps_cond"].float()  # [B, F, 1, H, W]
+            depth_maps = torch.cat([batch["depth_maps"][:,0:1].float(), depth_maps], dim=1) # [B, F, 1, H, W]
 
-        return rendered_cond_frames
+            out = self.cache3d(
+                images = images,
+                depths = depth_maps,
+                extrinsics = extrinsics_cond.to(self.model.device).float(),
+                intrinsics = intrinsics_cond,
+                target_extrinsics=extrinsics.to(self.model.device).float(),
+                target_intrinsics=intrinsics,
+            )
+            if self.cache3d._return_mask == True:
+                rendered_cond_frames, mask = out
+                mask = rearrange(mask, "B T H W 1 -> B 1 T H W")
+            else:
+                rendered_cond_frames = out
+            
+            #qimport ipdb; ipdb.set_trace()
+            #video_gt = Video.fromArray(batch['video'][0], "CTHW")
+            #video_render = Video.fromArray(rendered_cond_frames[0], "THWC")
+            #video_save = video_gt | video_render
+            #video_save.grid('vertical', file="debug.png")
+
+            rendered_cond_frames = rearrange(rendered_cond_frames, "B F H W C -> B F C H W")
+            rendered_cond_frames = rendered_cond_frames*2. - 1.
+            return rendered_cond_frames, mask
+
 
     @torch.no_grad()
     @torch.autocast(device_type="cuda", enabled=False)
@@ -685,7 +746,7 @@ class CamContext2Video(CameraControlLVDM):
 
  
         #with Timer("get_batch_input"):
-        z, c, xrec, xc, fs, additional_condition, cond_frame_index, cond_x, x, camera_data, video_path, depth_scale, cache3d_rendering = self.get_batch_input(
+        batch_input = self.get_batch_input(
             batch,
             random_uncond=False,
             return_first_stage_outputs=True,
@@ -701,9 +762,22 @@ class CamContext2Video(CameraControlLVDM):
             return_depth_scale=True,
             return_cache3d_rendering=True,
             return_additional_condition=True,
+            return_context_add=self.has_context_encoder_crossattn,
+            return_cache3d_mask=self.use_cache3d_mask,
             trace_scale_factor=trace_scale_factor,
             cond_frame_index=cond_frame_index,
         )
+
+        if self.has_context_encoder_crossattn:
+            if self.use_cache3d_mask:
+                z, c, xrec, xc, fs, additional_condition, z_context_add, cache3d_mask, cond_frame_index, cond_x, x, camera_data, video_path, depth_scale, cache3d_rendering = batch_input
+            else:
+                z, c, xrec, xc, fs, additional_condition, z_context_add, cond_frame_index, cond_x, x, camera_data, video_path, depth_scale, cache3d_rendering = batch_input
+        else:
+            if self.use_cache3d_mask:
+                z, c, xrec, xc, fs, additional_condition, cache3d_mask, cond_frame_index, cond_x, x, camera_data, video_path, depth_scale, cache3d_rendering = batch_input
+            else:
+                z, c, xrec, xc, fs, additional_condition, cond_frame_index, cond_x, x, camera_data, video_path, depth_scale, cache3d_rendering = batch_input
 
 
 
@@ -765,6 +839,9 @@ class CamContext2Video(CameraControlLVDM):
             log.update(pre_process_log)
             kwargs.update(pre_process_kwargs)
             kwargs.update({"additional_condition": additional_condition})
+            kwargs.update({"context_mask": cache3d_mask} if self.use_cache3d_mask else {})
+            if self.has_context_encoder_crossattn:
+                kwargs.update({"context_add": z_context_add})
 
             with self.ema_scope("Plotting"):
                 #with Timer("sample_log"):
@@ -785,10 +862,25 @@ class CamContext2Video(CameraControlLVDM):
         return log
 
     def shared_step(self, batch, random_uncond, **kwargs):
-        x, c, fs, additional_condition, *add_args = self.get_batch_input(batch, random_uncond=random_uncond, return_fs=True, return_additional_condition=True,)
+        batch_input = self.get_batch_input(batch, random_uncond=random_uncond, return_fs=True, return_additional_condition=True, return_context_add=self.has_context_encoder_crossattn, return_cache3d_mask=self.use_cache3d_mask)
+
+        if self.has_context_encoder_crossattn:
+            if self.use_cache3d_mask:
+                x, c, fs, additional_condition, z_context_add, cache3d_mask, *add_args = batch_input
+            else:
+                x, c, fs, additional_condition, z_context_add, *add_args = batch_input
+        else:
+            if self.use_cache3d_mask:
+                x, c, fs, additional_condition, cache3d_mask, *add_args = batch_input
+            else:
+                x, c, fs, additional_condition, *add_args = batch_input
+
         #import ipdb; ipdb.set_trace()
         kwargs.update({"fs": fs.long()})
         kwargs.update({"additional_condition": additional_condition})
+        kwargs.update({"context_mask": cache3d_mask} if self.use_cache3d_mask else {})
+        if self.has_context_encoder_crossattn:
+            kwargs.update({"context_add": z_context_add})
         #import ipdb; ipdb.set_trace()
         loss, loss_dict = self(x, c, **kwargs)
         return loss, loss_dict

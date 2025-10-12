@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from math import ceil
 
 from torchvision import transforms
+from pathlib import Path
 
 import random
 import omegaconf
@@ -20,11 +21,10 @@ from torch.utils.data import Dataset
 
 from decord import VideoReader, cpu, gpu
 
-from utils.utils import instantiate_from_config
+
 from einops import rearrange
 mainlogger = logging.getLogger('mainlogger')
 
-from pathlib import Path
 
 from tqdm import tqdm
 
@@ -167,7 +167,7 @@ class RealEstate10K(Dataset):
                 additional_cond_frames: Literal['none', 'random', 'last', "random_true", "random_offset", "random_full"] | int | List[int]='none',
                 num_additional_cond_frames: Union[List[int], int]=0,
                 suppress_output=True,
-                numpy_keys: List[str] = ["RT", "RT_cond"],
+                numpy_keys: List[str] = ["RT", "RT_cond", "RT_depth", "RT_depth_cond"], # keys to keep as NumPy arrays to avoid implicit type casting
                 verify: bool = False,
                 ):
         super().__init__()
@@ -280,20 +280,29 @@ class RealEstate10K(Dataset):
             confidence_path = confidence_path,
             depth_camera_path = depth_camera_path
         )
+        if fxd is not None:
+            req_indices_c = [min(ind, fxd.shape[0]-1) for ind in req_indices] # Clamp out-of-bound indices
+
         if depth is not None:
             depth = depth[req_indices]  # [T+N, H, W], float32
+            if fxd is not None:
+                fxd = fxd[req_indices_c]
+                fyd = fyd[req_indices_c]
+                cxd = cxd[req_indices_c]
+                cyd = cyd[req_indices_c]
+
             # Resize/crop to target res and adjust intrinsics for depth camera
-            depth, camera_intrinsics_depth, *_ = resize_for_rectangle_crop(depth.unsqueeze(0), self.resolution[0], self.resolution[1], fxd, fyd, cxd, cyd)
+            depth, camera_intrinsics_depth, *_ = resize_for_rectangle_crop(depth.unsqueeze(1), self.resolution[0], self.resolution[1], fxd, fyd, cxd, cyd)
             # Split into main (T) and cond (N)
             depth, depth_cond = torch.split(depth, [len(frame_indices), len(context_indices)], dim=0)  # [T, H, W], [N, H, W]
             if camera_intrinsics_depth is not None:
                 camera_intrinsics_depth, camera_intrinsics_depth_cond = torch.split(camera_intrinsics_depth, [len(frame_indices), len(context_indices)], dim=0)  # [T, 3, 3], [N, 3, 3]
         if confidence is not None:
             confidence = confidence[req_indices]  # [T+N, H, W], float32
-            confidence, *_ = resize_for_rectangle_crop(confidence.unsqueeze(0), self.resolution[0], self.resolution[1])
+            confidence, *_ = resize_for_rectangle_crop(confidence.unsqueeze(1), self.resolution[0], self.resolution[1])
             confidence, confidence_cond = torch.split(confidence, [len(frame_indices), len(context_indices)], dim=0)  # [T, H, W], [N, H, W]
         if depth_camera_extrinsics is not None:
-            depth_camera_extrinsics = depth_camera_extrinsics[req_indices]  # [T+N, 4, 4]
+            depth_camera_extrinsics = depth_camera_extrinsics[req_indices_c]  # [T+N, 4, 4]
             depth_camera_extrinsics,  depth_camera_extrinsics_cond = torch.split(depth_camera_extrinsics, [len(frame_indices), len(context_indices)], dim=0)  # [T, 4, 4], [N, 4, 4]
 
         # --- Spatial transforms for RGB and pinhole intrinsics (main + cond) ---
@@ -620,6 +629,14 @@ class RealEstate10K(Dataset):
                     sample['RT_cond'] = sample['RT_cond'][:num_cond_frames]
                     sample['camera_intrinsics_cond'] = sample['camera_intrinsics_cond'][:num_cond_frames]
                     sample['condition_indices'] = sample['condition_indices'][:num_cond_frames]
+                    if sample['depth_maps_cond'] is not None:
+                        sample['depth_maps_cond'] = sample['depth_maps_cond'][:num_cond_frames]
+                    if sample['RT_depth_cond'] is not None:
+                        sample['RT_depth_cond'] = sample['RT_depth_cond'][:num_cond_frames]
+                    if sample['camera_intrinsics_depth_cond'] is not None:
+                        sample['camera_intrinsics_depth_cond'] = sample['camera_intrinsics_depth_cond'][:num_cond_frames]
+                    if sample['confidence_maps_cond'] is not None:
+                        sample['confidence_maps_cond'] = sample['confidence_maps_cond'][:num_cond_frames]
             else:
                 for sample in batch:
                     del sample['cond_frames']
@@ -687,8 +704,10 @@ def load_depth_data(
                 path.suffix = ".npy"
                 if not os.path.exists(path):
                     return None
-            
-            return fdcomp.load(path)
+            data = fdcomp.load(path)
+            if isinstance(data, tuple):
+                data = data[0]
+            return data
         
         depth, confidence, camera_extrinsics = None, None, None
         fx, fy, cx, cy = None, None, None, None
@@ -906,11 +925,17 @@ if __name__ == "__main__":
     from VidUtil.debug import inspect
     from VidUtil import Video, hcat, vcat
     import time
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--test-speed", action="store_true", default=False, help="Test loading speed")
+    parser.add_argument("--verify", action="store_true", default=False, help="Verify dataset integrity")
+    args = parser.parse_args()
 
     output = Path("./output/new_dataset_test")
     B = 2
-    MAX_SAMPLES = 256
-    SPLIT = "test"
+    MAX_SAMPLES = 1000
+    SPLIT = "train"
 
     logger = logging.getLogger("mainlogger")
     logger.setLevel(logging.DEBUG)  
@@ -925,8 +950,8 @@ if __name__ == "__main__":
     dataset_params = {
         "data_dir":  f"/home/denninge/marvin/data/realestate10k_new/video_clips/{SPLIT}",
         "meta_path": f"/home/denninge/marvin/data/realestate10k_new/valid_metadata/{SPLIT}",
-        #"depth_camera_dir": f"/home/denninge/marvin/data/realestate10k_own/valid_metadata/{SPLIT}",
-        #"depth_dir": f"/home/denninge/marvin/data/realestate10k_own/depth_maps/{SPLIT}",
+        "depth_camera_dir": f"/home/denninge/marvin/data/realestate10k_own/valid_metadata/{SPLIT}",
+        "depth_dir": f"/home/denninge/marvin/data/realestate10k_own/depth_maps/{SPLIT}",
         #"confidence_dir": f"/home/denninge/marvin/data/realestate10k_own/confidence_maps/{SPLIT}",
         "meta_list": f"/home/denninge/marvin/data/realestate10k_own/{SPLIT}_valid_list.txt",
         "caption_file": f"/home/denninge/marvin/data/realestate10k_own/{SPLIT}_captions.json",
@@ -938,27 +963,30 @@ if __name__ == "__main__":
         "num_additional_cond_frames": [1, 4],
     }
     dataset = RealEstate10K(**dataset_params)
-    logger.info("Testing loading speed...")
-    runtimes = []
-    for i in range(MAX_SAMPLES):
-        start_time = time.time()
-        _ = dataset[i]
-        end_time = time.time()
-        duration = end_time - start_time
-        if i > 0:
-            runtimes.append(duration)
-    
-    avg_time = sum(runtimes) / len(runtimes)
-    logger.info(f"Average time per sample: {avg_time:.4f} seconds over {len(runtimes)} samples")
+    if args.test_speed:
 
-    logger.info("Verifying data...")
-    valid_videonames, _ = dataset.verify(check_video=True, verbose=True)
+        logger.info("Testing loading speed...")
+        runtimes = []
+        for i in tqdm(range(MAX_SAMPLES)):
+            start_time = time.time()
+            _ = dataset[i]
+            end_time = time.time()
+            duration = end_time - start_time
+            if i > 0:
+                runtimes.append(duration)
+        
+        avg_time = sum(runtimes) / len(runtimes)
+        logger.info(f"Average time per sample: {avg_time:.4f} seconds over {len(runtimes)} samples")
 
-    valid_file = output / "valid_videonames.txt"
-    with open(valid_file, "w") as f:
-        for name in valid_videonames:
-            f.write(f"{name}\n")
-    logger.info(f"Valid video names written to {valid_file}")
+    if args.verify:
+        logger.info("Verifying data...")
+        valid_videonames, _ = dataset.verify(check_video=True, verbose=True)
+
+        valid_file = output / "valid_videonames.txt"
+        with open(valid_file, "w") as f:
+            for name in valid_videonames:
+                f.write(f"{name}\n")
+        logger.info(f"Valid video names written to {valid_file}")
 
     data_loader = torch.utils.data.DataLoader(dataset, batch_size=B, shuffle=True, num_workers=0, drop_last=True, collate_fn=dataset.custom_collate_fn)
     for i, batch in enumerate(data_loader):
@@ -972,19 +1000,34 @@ if __name__ == "__main__":
         print(batch_str)
         videos = []
         condition_frames = []
+        depths = []
+        depths_cond = []
+        import ipdb; ipdb.set_trace()
         for j in range(B):
             video = Video.fromArray(batch['video'][j], "CTHW", name="Ground Truth")
             condition_frame = Video.fromArray(batch['cond_frames'][j], "TCHW", name="Conditioning Frames")
+            depth = Video.fromArray(batch['depth_maps'][j, ..., None], "THWC", name="Depth Maps") if batch.get('depth_maps', None) is not None else None
+            depth_cond = Video.fromArray(batch['depth_maps_cond'][j, ..., None], "THWC", name="Conditioning Depth Maps") if batch.get('depth_maps_cond', None) is not None else None
             videos.append(video)
             condition_frames.append(condition_frame)
+            depths.append(depth) if depth is not None else None
+            depths_cond.append(depth_cond) if depth_cond is not None else None  
         if len(videos) == 1:
             video = videos[0]
             condition_frame = condition_frames[0]
+            depth = depths[0] if len(depths) > 0 else None
+            depth_cond = depths_cond[0] if len(depths_cond) > 0 else None
         else:
             video = hcat(videos)
             condition_frame = hcat(condition_frames)
-        video.save(batch_dir / "video.mp4", fps=7)
-        condition_frame.save(batch_dir / "condition_frames.mp4", fps=1)
+            depth = hcat(depths) if len(depths) > 0 else None
+            depth_cond = hcat(depths_cond) if len(depths_cond) > 0 else None
+        video.grid('vertical', file=batch_dir / "video.png")
+        condition_frame.grid('vertical', file=batch_dir / "condition_frames.png")
+        if depth is not None:
+            depth.grid('vertical', file=batch_dir / "depth_maps.png")
+        if depth_cond is not None:
+            depth_cond.grid('vertical', file=batch_dir / "depth_maps_cond.png")
 
 
 

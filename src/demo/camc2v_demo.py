@@ -201,7 +201,7 @@ class CamC2VDemo:
             video_save = [video_gt, video_reconst]
 
             if "cache3d_rendering" in output and output["cache3d_rendering"] is not None:
-                video_cache3d = Video.fromArray(output["cache3d_rendering"][b], "CTHW", name="Cache3D Rendering")
+                video_cache3d = Video.fromArray(output["cache3d_rendering"][b], "TCHW", name="Cache3D Rendering")
                 video_save.append(video_cache3d)
             video_save.append(video_generated)
 

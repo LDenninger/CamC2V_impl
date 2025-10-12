@@ -27,7 +27,7 @@ if __name__ == "__main__":
     parser.add_argument("--machine", type=str, default="cvg28", help="Name of the machine")
     parser.add_argument("--num_samples", type=int, default=-1, help="Number of samples to generate")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for sampling.")
-    parser.add_argument("--output", type=Path, default="output", help="Output directory")
+    parser.add_argument("--output", type=Path, default=None, help="Output directory")
     parser.add_argument("--batch-size", type=int, default=1, help="Batch size per GPU")
     parser.add_argument("--sample-file", type=Path, default=None, help="Path to the file containing sample indices")
     parser.add_argument("--only-eval", action="store_true", help="Only run evaluation on existing outputs")
@@ -89,23 +89,20 @@ if __name__ == "__main__":
 
     # Model initialization
     demo_model = CamC2VDemo()
-    if args.only_eval:
-        if rank == 0:
-            print(colored("Only running evaluation on existing outputs...", "yellow"))
-        demo_model.evaluate(args.output)
-        sys.exit(0)
 
     ckpt_file = None
     config_file = Path(exp_config["experiment_directory"]) / "config.yaml"
 
+    ckpt_step = None
     if args.ckpt is not None:
         try:
-            ckpt_path = Path(exp_config["experiment_directory"]) / "checkpoints" / "trainstep_checkpoints"
+            ckpt_path = Path(exp_config["experiment_directory"]) / "checkpoints" 
+            
 
             if args.ckpt in ["last", "last.ckpt"]:
-                ckpt_file = Path(exp_config["experiment_directory"]) / "checkpoints" / "trainstep_checkpoints" / "last.ckpt"
+                ckpt_file = Path(exp_config["experiment_directory"]) / "checkpoints" / "last.ckpt"
             else:
-                ckpt_file = Path(exp_config["experiment_directory"]) / "checkpoints" / "trainstep_checkpoints" / f"{args.ckpt}.ckpt"
+                ckpt_file = Path(exp_config["experiment_directory"]) / "checkpoints" / f"{args.ckpt}.ckpt"
             ckpt_file = ckpt_file / "checkpoint" / "mp_rank_00_model_states.pt"
         except Exception as e:
             if rank == 0:
@@ -116,11 +113,22 @@ if __name__ == "__main__":
                 dist.destroy_process_group()
             sys.exit(1)
 
-        if rank == 0:
-            print(f"Loading model from {ckpt_file}")
-            print(inspect_checkpoint(ckpt_file, include_model_summary=False))
+        print(f"Loading model from {ckpt_file}")
+        ckpt_info = inspect_checkpoint(ckpt_file, include_model_summary=False, return_dict=True)
+        ckpt_step = ckpt_info["metadata"]["global_step"]
+        print(f"Checkpoint global step: {ckpt_step}")
     else:
         print(colored("No checkpoint specified, using pretrained weights!", "yellow"))
+    
+    if args.output is None:
+        args.output = Path("./output") / f"{args.model}_step_{ckpt_step}_sample_{Path(args.sample_file).stem}"
+        args.output.mkdir(parents=True, exist_ok=True)
+
+    if args.only_eval:
+        if rank == 0:
+            print(colored("Only running evaluation on existing outputs...", "yellow"))
+        demo_model.evaluate(args.output)
+        sys.exit(0)
 
     demo_model.load_model(
         config_file=config_file,

@@ -71,7 +71,7 @@ def run():
         if not os.path.exists(run_path):
             print(colored(f"Trying to resume training from non-existing run '{cfg.run_name}' -> {run_path}", "red"))
             return
-        ckpt_path = run_path / "checkpoints" / "trainstep_checkpoints" / f"{cfg.checkpoint}.ckpt"
+        ckpt_path = run_path / "checkpoints" / f"{cfg.checkpoint}.ckpt"
         if not os.path.exists(ckpt_path):
             print(colored(f"Checkpoint {ckpt_path} does not exist!", "red"))
             return
@@ -113,7 +113,7 @@ def run():
         os.makedirs(log_dir, exist_ok=True)
         os.makedirs(image_dir, exist_ok=True)
         os.makedirs(checkpoint_dir, exist_ok=True)
-
+    
     cfg.lightning.logger.params.save_dir = f"{cfg.env.experiment_directory}/{cfg.run_name}"
     cfg.lightning.callbacks.model_checkpoint.params.dirpath = f"{cfg.env.experiment_directory}/{cfg.run_name}/checkpoints"
     cfg_file = run_path / "config.yaml"

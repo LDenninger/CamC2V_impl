@@ -1,6 +1,6 @@
 target: utils_data.DataModuleFromConfig
 params:
-  batch_size: 1
+  batch_size: 2
   num_workers: 1
   wrap: false
   validation_max_n_samples: 256
@@ -12,6 +12,8 @@ params:
       meta_path: /home/denninge/marvin/data/realestate10k_new/valid_metadata/train
       meta_list: /home/denninge/marvin/data/realestate10k_own/train_valid_list.txt
       caption_file: /home/denninge/marvin/data/realestate10k_own/train_captions.json
+      depth_dir: /home/denninge/marvin/data/realestate10k_own/depth_maps/train
+      depth_camera_dir: /home/denninge/marvin/data/realestate10k_own/valid_metadata/train
       video_length: 16
       frame_stride: [1, 10]
       resolution: [ 256, 256 ]
@@ -24,6 +26,8 @@ params:
       meta_path: /home/denninge/marvin/data/realestate10k_new/valid_metadata/test
       meta_list: /home/denninge/marvin/data/realestate10k_own/test_valid_list.txt
       caption_file: /home/denninge/marvin/data/realestate10k_own/test_captions.json
+      depth_dir: /home/denninge/marvin/data/realestate10k_own/depth_maps/test
+      depth_camera_dir: /home/denninge/marvin/data/realestate10k_own/valid_metadata/test
       video_length: 16
       frame_stride: 8
       resolution: [ 256, 256 ]
