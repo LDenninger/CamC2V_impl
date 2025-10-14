@@ -662,7 +662,7 @@ class RealEstate10K(Dataset):
             data[key] = None
 
         for key in self._np_keys:
-            if key in data:
+            if key in data and data[key] is not None:
                 data[f"{key}_np"] = data[key].numpy()
         return data
 

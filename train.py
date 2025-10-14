@@ -52,12 +52,7 @@ def run():
         # 4) Final compose: put our generated defaults BEFORE CLI so the user can still override them
         cfg = compose(config_name="config", overrides=generated + cli_overrides)
 
-    cfg_yaml = OmegaConf.to_yaml(cfg, sort_keys=False)
 
-    if cfg.debug:
-        print(colored("Debug mode is ON.", "yellow"))
-        print("Run configuration:")
-        print(cfg_yaml)
 
     ## Setup run directory
     ckpt_path = None
@@ -116,6 +111,13 @@ def run():
     
     cfg.lightning.logger.params.save_dir = f"{cfg.env.experiment_directory}/{cfg.run_name}"
     cfg.lightning.callbacks.model_checkpoint.params.dirpath = f"{cfg.env.experiment_directory}/{cfg.run_name}/checkpoints"
+    
+    cfg_yaml = OmegaConf.to_yaml(cfg, sort_keys=False)
+    if cfg.debug:
+        print(colored("Debug mode is ON.", "yellow"))
+        print("Run configuration:")
+        print(cfg_yaml)
+        
     cfg_file = run_path / "config.yaml"
     with open(cfg_file, 'w') as f:
         f.write(cfg_yaml)

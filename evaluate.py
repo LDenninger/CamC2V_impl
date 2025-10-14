@@ -13,8 +13,13 @@ from pathlib import Path
 import math
 import torch.distributed as dist
 import signal
+import textwrap
+import shlex
+import subprocess
 from einops import rearrange
 
+from configs.meta import ENVIRONMENT_SETUP
+from src.utils.slurm import run_squeue
 from src.data.utils import get_realestate10k
 from src.demo.camc2v_demo import CamC2VDemo
 
@@ -31,7 +36,108 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=1, help="Batch size per GPU")
     parser.add_argument("--sample-file", type=Path, default=None, help="Path to the file containing sample indices")
     parser.add_argument("--only-eval", action="store_true", help="Only run evaluation on existing outputs")
+    parser.add_argument("--schedule", action="store_true", help="Schedule the evaluation via SLURM instead of running directly")
+    parser.add_argument("--num_gpus", type=int, default=1, help="Number of GPUs to use for evaluation")
+    parser.add_argument("--dependency", type=str, default=None, help="SLURM job dependency (e.g., afterok:12345)")
     args = parser.parse_args()
+
+    # Handle SLURM scheduling
+    if args.schedule:
+        # Setup experiment and environment for SLURM
+        machine_env_config = "./configs/env/" + args.machine + ".yaml"
+        with open(machine_env_config, 'r') as f:
+            exp_config = yaml.safe_load(f)
+        
+        exp_config["experiment_directory"] = Path(exp_config["experiment_directory"]) / args.model
+        run_path = Path(exp_config["experiment_directory"])
+        run_path.mkdir(parents=True, exist_ok=True)
+        
+        # Create logs directory
+        logs_dir = run_path / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create SLURM script
+        slurm_script = "#!/bin/bash\n"
+        
+        # SLURM directives
+        if args.output is None:
+            output_name = f"{args.model}_step_{args.ckpt if args.ckpt else 'pretrained'}_sample_{Path(args.sample_file).stem if args.sample_file else 'all'}"
+        else:
+            output_name = Path(args.output).name
+            
+        stdout_file = run_path / "logs" / f"eval_{output_name}.log"
+        
+        slurm_cmds = textwrap.dedent(f"""\
+            #SBATCH --partition={exp_config.get('partition', 'gpu')}
+            #SBATCH --account {exp_config.get('account', '')}
+            #SBATCH --job-name=eval_{args.model}
+            #SBATCH --output={stdout_file}
+            #SBATCH --error={stdout_file}
+            #SBATCH --cpus-per-task={exp_config.get('cpus_per_task', 8)}
+            #SBATCH --ntasks={args.num_gpus}
+            #SBATCH --ntasks-per-node={args.num_gpus}
+            #SBATCH --mem-per-cpu={exp_config.get('mem_per_cpu', 8)}G
+            #SBATCH --nodes=1
+            #SBATCH --gpus={args.num_gpus}
+            #SBATCH --time=02:00:00
+        """)
+        
+        if args.machine == "marvin": 
+            slurm_cmds += "#SBATCH --export NONE\n"
+        
+        # Environment setup
+        env_setup = ENVIRONMENT_SETUP.get(args.machine, "")
+        
+        # Create run command (remove --schedule to avoid infinite recursion)
+        if args.num_gpus > 1:
+            run_command = f"torchrun --standalone --nproc_per_node={args.num_gpus} --node_rank=0 --rdzv_id=12345 --rdzv_backend=c10d {' '.join(sys.argv[0:1])}"
+        else:
+            run_command = f"python {' '.join(sys.argv[0:1])}"
+        
+        for arg in sys.argv[1:]:
+            if arg != "--schedule":
+                run_command += f" {shlex.quote(arg)}"
+        
+        slurm_script += f"{slurm_cmds}\n"
+        slurm_script += f"{env_setup}\n"
+        slurm_script += f"{run_command}\n"
+        
+        # Save SLURM script
+        slurm_script_file = run_path / "eval.slurm"
+        with open(slurm_script_file, 'w') as f:
+            f.write(slurm_script)
+        
+        print(colored(f"SLURM script created at: {slurm_script_file}", "green"))
+        print(colored(f"Output will be logged to: {stdout_file}", "green"))
+        
+        # Submit job
+        slurm_command = ["sbatch"]
+        if args.dependency is not None:
+            slurm_command.append(f"--dependency={args.dependency}")
+        slurm_command.append(str(slurm_script_file))
+        try:
+            result = subprocess.run(slurm_command, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                print(colored("Evaluation job submitted successfully.", "green"))
+                print(result.stdout)
+                
+                time.sleep(2)
+                try:
+                    print(run_squeue())
+                except Exception as e:
+                    print(colored(f"Could not run squeue: {e}", "yellow"))
+            else:
+                print(colored("Error submitting job:", "red"))
+                print(result.stderr)
+                sys.exit(1)
+        except FileNotFoundError:
+            print(colored("Error: sbatch command not found. Make sure you are on a SLURM system.", "red"))
+            print(colored(f"SLURM script has been created at: {slurm_script_file}", "yellow"))
+            print(colored("You can submit it manually using: sbatch eval.slurm", "yellow"))
+            sys.exit(1)
+        
+        sys.exit(0)
 
     # --- Distributed init (torchrun) ---
     world_size = int(os.environ.get("WORLD_SIZE", "1"))

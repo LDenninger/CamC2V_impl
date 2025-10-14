@@ -200,6 +200,7 @@ if __name__ == "__main__":
         model.register_schedule(given_betas=model.given_betas, beta_schedule=model.beta_schedule, timesteps=model.timesteps,
                                 linear_start=model.linear_start, linear_end=model.linear_end, cosine_s=model.cosine_s)
 
+    #import ipdb; ipdb.set_trace()
     if global_rank == 0:
         #import ipdb; ipdb.set_trace()
         model_summary_file = os.path.join(workdir, "logs", "model_summary.txt")

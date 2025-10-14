@@ -195,7 +195,7 @@ class CamContext2Video(CameraControlLVDM):
                             param.requires_grad_(epipolar_attn_trainable)
          
         for p in context_encoder.parameters():
-            p.requires_grad_(False)
+            p.requires_grad_(self.context_encoder_trainable)
         self.model.diffusion_model.context_encoder = context_encoder
 
         if inject_trainable_lora_unet:
@@ -410,7 +410,7 @@ class CamContext2Video(CameraControlLVDM):
             rendered_cond_frames = torch.minimum(rendered_cond_frames, torch.ones(1).to(rendered_cond_frames.device))*2. - 1.
             self.cache3d.reset()
 
-            return rendered_cond_frames
+            return rendered_cond_frames, mask
         elif isinstance(self.cache3d, Cache3DPCD):
             #import ipdb; ipdb.set_trace()
             _cond_frame_avail = 'cond_frames' in batch and batch['cond_frames'] is not None
@@ -684,11 +684,10 @@ class CamContext2Video(CameraControlLVDM):
             else:
                 params.append(self.logvar)
         
-        if self.context_encoder_trainable:
-            for p in self.model.diffusion_model.context_encoder.parameters():
-                p.requires_grad = True
-            mainlogger.info(f"@Training [{len(list(self.model.diffusion_model.context_encoder.parameters()))}] Parameters for context_encoder.")
-            params.extend(self.model.diffusion_model.context_encoder.parameters())
+        #import ipdb; ipdb.set_trace()
+        #if self.context_encoder_trainable:
+        #    mainlogger.info(f"@Training [{len(list(self.model.diffusion_model.context_encoder.parameters()))}] Parameters for context_encoder.")
+        #    params.extend(self.model.diffusion_model.context_encoder.parameters())
 
         #if self.multi_cond_in_projection is not None:
         #    params.extend(list(self.multi_cond_in_projection.parameters()))

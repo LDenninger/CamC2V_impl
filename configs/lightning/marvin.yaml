@@ -23,7 +23,6 @@ callbacks:
   model_checkpoint:
     target: pytorch_lightning.callbacks.ModelCheckpoint
     params:
-      dirpath: ""
       save_top_k: -1
       filename: '{step}'
       save_weights_only: false
