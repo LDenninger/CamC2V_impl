@@ -3,7 +3,7 @@ trainer:
   devices: 4
   accelerator: "gpu"
   strategy: "deepspeed_stage_1"
-  precision: "bf16-mixed"
+  precision: "16-mixed"
   benchmark: true
   accumulate_grad_batches: 4
   max_steps: 20000

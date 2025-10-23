@@ -703,12 +703,11 @@ class ContextEncoder(nn.Module):
                 hs[i] = rearrange(hs[i], '(b t) c h w -> b c t h w', b=b)
                 hs[i] = zero_conv(hs[i])
                 hs[i] = rearrange(hs[i], 'b c t h w -> (b t) c h w')
+
         if mask is not None:
-            for h in hs:
-                if h.shape[-2:] in output_mask_map:
-                    h = h * output_mask_map[h.shape[-2:]]
-           
-        
+            for i in range(len(hs)):
+                if hs[i].shape[-2:] in output_mask_map:
+                    hs[i] = hs[i] * output_mask_map[hs[i].shape[-2:]]
 
         return hs, self.input_ds
 

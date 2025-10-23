@@ -164,8 +164,7 @@ if __name__ == "__main__":
     dataset_args = {"frame_stride": 6}
     if args.sample_file is not None:
         dataset_args["meta_list"] = args.sample_file
-    dataset = get_realestate10k(args.machine, **dataset_args)
-
+    dataset = get_realestate10k(args.machine, depth_dataset=True, **dataset_args)
     if args.sample_file is not None:
         print(f"Using sample file: {args.sample_file}, number of samples: {len(dataset)}")
 
@@ -286,10 +285,17 @@ if __name__ == "__main__":
             condition_frames = batch['cond_frames'], # [B, N, C, H, W]
             extrinsics_condition = batch['RT_cond'], # [B, N, 4, 4]
             intrinsics_condition = batch['camera_intrinsics_cond'], # [B, N, 3, 3]
+            depth_maps = batch['depth_maps'], # [B, T, H, W]
+            depth_maps_condition = batch['depth_maps_cond'], # [B, N, H, W]
+            extrinsics_depth_maps = batch['RT_depth'], # [B, T, 4
+            intrinsics_depth_maps = batch['camera_intrinsics_depth'], # [B, T, 3, 3]
+            extrinsics_depth_maps_condition = batch['RT_depth_cond'], # [B, N, 4, 4]
+            intrinsics_depth_maps_condition= batch['camera_intrinsics_depth_cond'], # [B, N, 3, 3]
             frame_stride = batch["frame_stride"],
             caption = batch['caption'],
             video_path = batch['video_path'],
-            output_dir=args.output
+            output_dir=args.output,
+            enable_camera_condition=args.model != "dynamicrafter"
         )
 
         if rank == 0:

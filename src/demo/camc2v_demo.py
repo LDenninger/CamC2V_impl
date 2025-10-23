@@ -11,7 +11,7 @@ from utils.utils import instantiate_from_config
 import numpy as np
 
 from VidUtil import Video, hcat, vcat
-from VidUtil.metrics import SSIM, LPIPS, PSNR, MSE
+from VidUtil.metrics import FVD, SSIM, LPIPS, PSNR, MSE
 import tabulate
 
 from termcolor import colored
@@ -35,6 +35,14 @@ class CamC2VDemo:
                  intrinsics_condition: torch.Tensor, # [B, N, 3, 3]
                  frame_stride: int,
                  caption: str,
+
+                 depth_maps: torch.Tensor = None, # [B, T, 1, H, W]
+                 depth_maps_condition: torch.Tensor = None, # [B, N, 1, H, W]
+                 extrinsics_depth_maps: torch.Tensor = None, # [B, T, 4, 4]
+                 intrinsics_depth_maps: torch.Tensor = None, # [B, T, 3, 3]
+                 extrinsics_depth_maps_condition: torch.Tensor = None, # [B, N, 4, 4]
+                 intrinsics_depth_maps_condition: torch.Tensor = None, # [B, N,
+  
                  video_path: str = [""],
                  negative_prompt: str = None,
                  fps: int = None,
@@ -45,6 +53,8 @@ class CamC2VDemo:
                  eta: float = 1.0,
                  steps: int = 25,
                  output_dir: str = None,
+
+                 enable_camera_condition: bool = False,
                  **kwargs
                  ):
         
@@ -59,6 +69,12 @@ class CamC2VDemo:
             "RT_cond": extrinsics_condition.to("cuda"),
             "RT_cond_np": extrinsics_condition.cpu().numpy(),
             "camera_intrinsics_cond": intrinsics_condition.to("cuda"),
+            "depth_maps": depth_maps.to("cuda") if depth_maps is not None else None,
+            "depth_maps_cond": depth_maps_condition.to("cuda") if depth_maps_condition is not None else None,
+            "RT_depth": extrinsics_depth_maps.to("cuda") if extrinsics_depth_maps is not None else None,
+            "camera_intrinsics_depth": intrinsics_depth_maps.to("cuda") if intrinsics_depth_maps is not None else None,
+            "RT_depth_cond": extrinsics_depth_maps_condition.to("cuda") if extrinsics_depth_maps_condition is not None else None,
+            "camera_intrinsics_depth_cond": intrinsics_depth_maps_condition.to("cuda") if intrinsics_depth_maps_condition is not None else None,
             "caption": caption,
             "video_path": video_path,
             "frame_stride": frame_stride.to("cuda"),
@@ -71,7 +87,7 @@ class CamC2VDemo:
             "guidance_rescale": 0.7,
             "camera_cfg": camera_cfg,
             "camera_cfg_scheduler": "constant",
-            "enable_camera_condition": True,
+            "enable_camera_condition": enable_camera_condition,
             "cond_frame_index": torch.zeros(B, dtype=torch.long),
             "trace_scale_factor": trace_scale_factor,
             "negative_prompt": negative_prompt,
@@ -93,6 +109,8 @@ class CamC2VDemo:
         if output_dir is not None:
             self._save(batch, output, output_dir)
 
+        return rearrange(output["samples"], "B C T H W -> B T C H W")
+
 
     def evaluate(self, path: os.PathLike):
         path = Path(path)
@@ -103,6 +121,7 @@ class CamC2VDemo:
         lpips_metric = LPIPS()
         psnr_metric = PSNR()
         mse_metric = MSE()
+        fvd_metric = FVD()
 
         _has_cache3d = False
         #import ipdb; ipdb.set_trace()
@@ -127,17 +146,20 @@ class CamC2VDemo:
             lpips_metric(video_generated, video_ground_truth)
             psnr_metric(video_generated, video_ground_truth)
             mse_metric(video_generated, video_ground_truth)
+            fvd_metric(video_generated, video_ground_truth)
 
         ssim_generated = ssim_metric.result
         lpips_generated = lpips_metric.result
         psnr_generated = psnr_metric.result
         mse_generated = mse_metric.result
+        fvd_generated = fvd_metric.result
 
         if _has_cache3d:
             ssim_metric.reset()
             lpips_metric.reset()
             psnr_metric.reset()
             mse_metric.reset()
+            fvd_metric.reset()
 
             for video_dir in video_dirs:
 
@@ -155,11 +177,13 @@ class CamC2VDemo:
                 lpips_metric(video_cache3d, video_ground_truth)
                 psnr_metric(video_cache3d, video_ground_truth)
                 mse_metric(video_cache3d, video_ground_truth)
+                fvd_metric(video_cache3d, video_ground_truth)
             
             ssim_cache3d = ssim_metric.result
             lpips_cache3d = lpips_metric.result
             psnr_cache3d = psnr_metric.result
             mse_cache3d = mse_metric.result
+            fvd_cache3d = fvd_metric.result
 
             table = [
                 ["Metric", "Generated", "Cache3D"],
@@ -167,6 +191,7 @@ class CamC2VDemo:
                 ["LPIPS", lpips_generated, lpips_cache3d],
                 ["PSNR", psnr_generated, psnr_cache3d],
                 ["MSE", mse_generated, mse_cache3d],
+                ["FVD", fvd_generated, fvd_cache3d],
             ]
 
         else:    
@@ -176,6 +201,7 @@ class CamC2VDemo:
                 ["LPIPS", lpips_generated],
                 ["PSNR", psnr_generated],
                 ["MSE", mse_generated],
+                ["FVD", fvd_generated],
             ]
         table_str = tabulate.tabulate(table, headers="firstrow", tablefmt="fancy_grid")
         with open(path / "000_results.txt", "w") as f:

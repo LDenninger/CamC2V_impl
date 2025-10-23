@@ -13,6 +13,7 @@ params:
       meta_list: /p/project1/westai0081/data/realestate10k_own/train_valid_list.txt
       caption_file: /p/project1/westai0081/data/realestate10k_own/train_captions.json
       depth_dir: /p/project1/westai0081/data/realestate10k_own/depth_maps/train
+      confidence_dir: /p/project1/westai0081/data/realestate10k_own/confidence_maps/train
       depth_camera_dir: /p/project1/westai0081/data/realestate10k_own/valid_metadata/train
       video_length: 16
       frame_stride: [1, 10]
@@ -27,6 +28,7 @@ params:
       meta_list: /p/project1/westai0081/data/realestate10k_own/test_valid_list.txt
       caption_file: /p/project1/westai0081/data/realestate10k_own/test_captions.json
       depth_dir: /p/project1/westai0081/data/realestate10k_own/depth_maps/test
+      confidence_dir: /p/project1/westai0081/data/realestate10k_own/confidence_maps/test
       depth_camera_dir: /p/project1/westai0081/data/realestate10k_own/valid_metadata/test
       video_length: 16
       frame_stride: 8

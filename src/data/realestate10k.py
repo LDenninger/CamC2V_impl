@@ -715,7 +715,9 @@ def load_depth_data(
             depth = _load(depth_path)
             depth  = torch.from_numpy(depth).float() if depth is not None else None  # [T, H, W]
         if confidence_path is not None:
-            confidence = torch.from_numpy(_load(confidence_path)).float() if confidence is not None else None  # [T, H, W]
+            confidence = _load(confidence_path)
+            if confidence is not None:
+                confidence = torch.from_numpy(confidence).float()
         if depth_camera_path is not None:
             camera_extrinsics, fx, fy, cx, cy = load_camera_file(depth_camera_path)
 

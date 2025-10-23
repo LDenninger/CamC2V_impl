@@ -82,6 +82,7 @@ class CamContext2Video(CameraControlLVDM):
                     context_encoder_trainable: bool = False,
                     diffusion_model_trainable: bool = False,
                     use_cache3d_mask: bool = False,
+                    use_confidence_mask: bool = False,
                     diffusion_model_trainable_param_list: list = [],
                     first_unet_block_freeze_steps: int = 0,
                     zero_convolution: bool = True,
@@ -109,6 +110,7 @@ class CamContext2Video(CameraControlLVDM):
         self.use_zero_convolution = zero_convolution
         self.use_semantic_branch = use_semantic_branch
         self.use_cache3d_mask = use_cache3d_mask
+        self.use_confidence_mask = use_confidence_mask
         self.cache3d_config = cache3d
         self.visual_cross_attn_config = visual_cross_attn_config
         self.ground_truth_debug_mode = ground_truth_debug_mode
@@ -345,7 +347,6 @@ class CamContext2Video(CameraControlLVDM):
             xrec = self.decode_first_stage(z)
             out.extend([xrec])
 
-
         if return_original_cond:
             out.append(cond_input)
         if return_fs:
@@ -406,10 +407,14 @@ class CamContext2Video(CameraControlLVDM):
             images = torch.cat([img_ref, images], dim=1) # [B, F, C, H, W]
             self.cache3d.update(images, extrinsics_cond, intrinsics_cond)
 
-            rendered_cond_frames = self.cache3d.render(extrinsics, intrinsics) # [B, F, C, H, W]
+            out = self.cache3d.render(extrinsics, intrinsics, return_weight=self.use_cache3d_mask) # [B, F, C, H, W]
+            if self.use_cache3d_mask:
+                rendered_cond_frames, mask = out
+                mask = rearrange(mask, "B T 1 H W -> B 1 T H W")
+            else:
+                rendered_cond_frames = out
             rendered_cond_frames = torch.minimum(rendered_cond_frames, torch.ones(1).to(rendered_cond_frames.device))*2. - 1.
             self.cache3d.reset()
-
             return rendered_cond_frames, mask
         elif isinstance(self.cache3d, Cache3DPCD):
             #import ipdb; ipdb.set_trace()
@@ -431,12 +436,17 @@ class CamContext2Video(CameraControlLVDM):
             ## Source depth maps
             depth_maps = batch["depth_maps_cond"].float()  # [B, F, 1, H, W]
             depth_maps = torch.cat([batch["depth_maps"][:,0:1].float(), depth_maps], dim=1) # [B, F, 1, H, W]
+            if self.use_confidence_mask:
+                confidence_maps = batch["confidence_maps_cond"].float()  # [B, F, 1, H, W]
+                confidence_maps = torch.cat([batch["confidence_maps"][:,0:1].float(), confidence_maps], dim=1) # [B, F, 1, H, W]
 
+            #import ipdb; ipdb.set_trace()
             out = self.cache3d(
                 images = images,
                 depths = depth_maps,
                 extrinsics = extrinsics_cond.to(self.model.device).float(),
                 intrinsics = intrinsics_cond,
+                confidence = confidence_maps if self.use_confidence_mask else None,
                 target_extrinsics=extrinsics.to(self.model.device).float(),
                 target_intrinsics=intrinsics,
             )
@@ -656,9 +666,14 @@ class CamContext2Video(CameraControlLVDM):
         weight_decay = self.weight_decay
 
         # params = list(self.model.parameters())
-        params = [p for p in self.model.parameters() if p.requires_grad == True]
+        params = []
+        mainlogger.info("Diffusion model trainable parameters:")
+        for n, p in self.model.named_parameters():
+            if p.requires_grad == True:
+                mainlogger.info(f"{n}: shape: {p.shape} grad: {p.requires_grad}")
+                params.append(p)
+        #params = [p for p in self.model.parameters() if p.requires_grad == True]
         mainlogger.info(f"@Training [{len(params)}] Trainable Paramters.")
-
         if self.pose_encoder is not None and self.pose_encoder_trainable:
             params_pose_encoder = [p for p in self.pose_encoder.parameters() if p.requires_grad == True]
             mainlogger.info(f"@Training [{len(params_pose_encoder)}] Paramters for pose_encoder.")
@@ -698,6 +713,7 @@ class CamContext2Video(CameraControlLVDM):
         #    params.extend(params_latent_adapter)
 
         ## optimizer
+
         optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
 
         ## lr scheduler

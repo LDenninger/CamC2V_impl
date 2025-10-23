@@ -1,4 +1,4 @@
-import os
+import os, sys
 import torch
 import logging
 from pathlib import Path
@@ -6,10 +6,19 @@ mainlogger = logging.getLogger('mainlogger')
 
 import torch
 import numpy as np
-from .mvsplat.src.model.encoder import get_encoder
-from .mvsplat.src.model.decoder import get_decoder
-from .mvsplat.src.config import load_typed_root_config
-from .mvsplat.src.global_cfg import set_cfg
+
+try:
+    from .mvsplat.src.model.encoder import get_encoder
+    from .mvsplat.src.model.decoder import get_decoder
+    from .mvsplat.src.config import load_typed_root_config
+    from .mvsplat.src.global_cfg import set_cfg
+except ImportError as e:
+    sys.path.append(os.getcwd())
+    sys.path.append(str(Path(os.getcwd())/"src"))
+    from src.model.cache3d.cache3d_mvsplat.mvsplat.src.model.encoder import get_encoder
+    from src.model.cache3d.cache3d_mvsplat.mvsplat.src.model.decoder import get_decoder
+    from src.model.cache3d.cache3d_mvsplat.mvsplat.src.config import load_typed_root_config
+    from src.model.cache3d.cache3d_mvsplat.mvsplat.src.global_cfg import set_cfg
 
 from einops import rearrange, repeat
 
@@ -151,7 +160,21 @@ class MvSplatCache3D:#(Cache3DBase):
         height: int | None = None,
         width: int | None = None,
         return_weight: bool = False,
+        filter_weight: bool = True,
     ):
+        """
+            Rendering a video from the Gaussians in 3D Cache along the provided camera trajectory.
+
+            Args:
+                :param poses: (B, N, 4, 4) camera extrinsics (c2w)
+                :param intrinsics: (B, N, 3, 3) camera intrinsics (ndc)
+                :param height: rendering height
+                :param width: rendering width
+                :param return_weight: whether to return the weight map along with the rendering
+            Returns:
+                :return: (B, N, 3, H, W) rendered video in [0..1] float32
+        
+        """
         B, N = poses.shape[:2]
         height = height or self._height
         width = width or self._width
@@ -205,29 +228,57 @@ class MvSplatCache3D:#(Cache3DBase):
         if self._offload:
             self.offload(encoder=False, decoder=True)
         if return_weight:
-            weight = self._filter_weight(weight)
+            if filter_weight:
+                weight = self._filter_weight(weight)
             return rendering, weight
         return rendering
     
     @torch.no_grad()
     @torch.autocast(device_type="cuda", enabled=False)
     def _filter_weight(self, weight: torch.Tensor):
-        """ Apply morphological operations to the weight map to enhance it. """
-        #import ipdb; ipdb.set_trace()
-        weight = (weight >= self._weight_threshold).float()
-        if self._weight_dilation_steps == 0 and self._weight_erosion_steps == 0:
-            return weight
-        B, N, C, H, W = weight.shape
-        weight = weight.view(B*N, C, H, W)
-        for _ in range(self._weight_dilation_steps):
-            weight = self._weight_dilation(weight)
-            weight = (weight >= 0.5).float()
-        for _ in range(self._weight_erosion_steps):
-            weight = self._weight_erosion(weight)
-            weight = (weight >= 0.5).float()
-        weight = weight.view(B, N, C, H, W)
-        return weight
-    
+        """
+        Turns a weight map into a binary mask, then applies morphology.
+        Fixes soft-bias drift so multiple erosions/dilations won't produce all-black masks.
+
+        Expected shapes:
+        - (B, N, C, H, W)  OR  (B, C, H, W)
+        Uses self._weight_dilation (Dilation2d) and self._weight_erosion (Erosion2d),
+        and self._weight_threshold, *_steps as in your original code.
+        """
+        if weight.ndim == 5:
+            B, N, C, H, W = weight.shape
+            x = weight.reshape(B * N, C, H, W)
+            needs_reshape = True
+        elif weight.ndim == 4:
+            B, C, H, W = weight.shape
+            x = weight
+            needs_reshape = False
+        else:
+            raise ValueError("weight must be (B,N,C,H,W) or (B,C,H,W)")
+
+        # Normalize per-sample-channel to [0,1] to make threshold stable
+        x_min = x.amin(dim=(2, 3), keepdim=True)
+        x_max = x.amax(dim=(2, 3), keepdim=True)
+        x = (x - x_min) / (x_max - x_min + 1e-8)
+
+        # Initial binary mask
+        mask = (x >= self._weight_threshold).float()
+        # Apply morphology (modules should be created with matching in/out channels)
+        if getattr(self, "_weight_dilation_steps", 0) > 0:
+            for _ in range(self._weight_dilation_steps):
+                mask = self._weight_dilation(mask)
+        mask = (mask >= self._weight_threshold).float()
+        if getattr(self, "_weight_erosion_steps", 0) > 0:
+            for _ in range(self._weight_erosion_steps):
+                mask = self._weight_erosion(mask)
+
+        # Re-binarize after soft/hard ops
+        mask = (mask >= self._weight_threshold).float()
+
+        if needs_reshape:
+            mask = mask.view(B, N, C, H, W)
+
+        return mask
     @torch.no_grad()
     @torch.autocast(device_type="cuda", enabled=False)
     def get_debug_views(self, images: torch.Tensor | np.ndarray):
@@ -339,7 +390,7 @@ class MvSplatCache3D:#(Cache3DBase):
     def named_parameters(self):
         return self._encoder.named_parameters() + self._decoder.named_parameters()
     
-def cache3d_forward_batch(cache3d: MvSplatCache3D, batch, return_weight: bool = False):
+def cache3d_forward_batch(cache3d: MvSplatCache3D, batch, return_weight: bool = False, filter_weight: bool = False):
 
     def _norm_intrinsic(K, H=256, W=256):
         K[..., 0, 0] /= W
@@ -367,7 +418,7 @@ def cache3d_forward_batch(cache3d: MvSplatCache3D, batch, return_weight: bool = 
 
     cache3d.update(images, extrinsics_cond, intrinsics_cond)
 
-    ret = cache3d.render(extrinsics, intrinsics, return_weight=return_weight) # [B, F, C, H, W]
+    ret = cache3d.render(extrinsics, intrinsics, return_weight=return_weight, filter_weight=filter_weight) # [B, F, C, H, W]
     if return_weight:
         rendered_cond_frames, weight = ret
     else:
@@ -376,3 +427,73 @@ def cache3d_forward_batch(cache3d: MvSplatCache3D, batch, return_weight: bool = 
     cache3d.reset()
 
     return rendered_cond_frames, weight
+
+
+if __name__ == "__main__":
+    
+    from src.data.utils import get_realestate10k
+    from VidUtil import Video
+    from pytorch_lightning import seed_everything
+
+    seed_everything(42)
+    dataset = get_realestate10k("cvg28")
+    data_loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=1, drop_last=True, collate_fn=dataset.custom_collate_fn)
+
+    MAX_SAMPES = 40
+    OUTPUT = Path("./mvsplat_cache3d_debug")
+    if os.path.exists(OUTPUT):
+        import shutil
+        shutil.rmtree(OUTPUT)
+    OUTPUT.mkdir(parents=True, exist_ok=True)
+
+    cache3d = MvSplatCache3D(
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+        sequential = True,
+        offload = False,
+        keep_gaussians_on_device = True,
+        weight_dilation_steps = 1,
+        weight_erosion_steps = 3,
+        debug = True,
+        weight_threshold=0.2
+    )
+
+    for i, batch in enumerate(data_loader):
+        if i >= MAX_SAMPES:
+            break
+
+        video_name = Path(batch['video_path'][0]).stem
+        save_path = OUTPUT / f"{video_name}"
+        save_path.mkdir(parents=True, exist_ok=True)
+
+        print(f"Video: {video_name}")
+
+        rendering, weight = cache3d_forward_batch(cache3d, batch, return_weight=True, filter_weight=False)
+
+        img_ref = ((batch['video'][:,:,0] +1.)/2.).float().unsqueeze(1) # [B, 1, C, H, W]
+        images = ((batch['cond_frames']+1.)/2.).float()
+        images = torch.cat([img_ref, images], dim=1) # [B, F, C, H, W]
+
+        weight_filtered = cache3d._filter_weight(weight)
+
+        rendering_v = Video.fromArray(rendering[0], "TCHW")
+        weight_v = Video.fromArray(weight[0], "TCHW")
+        video_v = Video.fromArray(batch['video'][0], "CTHW")
+        weight_filtered_v = Video.fromArray(weight_filtered[0], "TCHW")
+        images_v = Video.fromArray(images[0], "TCHW")
+
+        video_save = video_v / rendering_v / weight_v / weight_filtered_v
+
+        video_save.grid("horizontal", file=save_path / "video.png")
+
+        video_path = save_path / "renderings"
+        video_path.mkdir(parents=True, exist_ok=True)
+        rendering_v.save_frames(video_path)
+
+        weight_path = save_path / "weights"
+        weight_path.mkdir(parents=True, exist_ok=True)
+        weight_filtered_v.save_frames(weight_path)
+
+        images_path = save_path / "input_images"
+        images_path.mkdir(parents=True, exist_ok=True)
+        images_v.save_frames(images_path)
+
