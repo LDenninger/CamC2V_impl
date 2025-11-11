@@ -58,7 +58,6 @@ if __name__ == "__main__":
         "mse": mse,
     }
 
-    import ipdb; ipdb.set_trace()
     print("\n".join([f" {k}: {float(v) if v is not None else 'none'}" for k, v in result_dict.items()]))
     with open(args.path / "new_results.yaml", "w") as f:
         yaml.dump(result_dict, f)

@@ -321,12 +321,12 @@ class RealEstate10K(Dataset):
             # Video
             "video": video,  # [3, T, H, W], float32, [-1, 1]
             "RT": camera_pose,  # [T, 4, 4]
-            "RT_np": camera_pose.numpy(),  # [T, 4, 4] # NumPy version to avoid implicit type casting
+            #"RT_np": camera_pose.numpy(),  # [T, 4, 4] # NumPy version to avoid implicit type casting
             "camera_intrinsics": camera_intrinsics,  # [T, 3, 3], non-NDC
             # Context Condition
             "cond_frames": condition_frames,  # [N, 3, H, W]
             "RT_cond": camera_pose_cond,  # [N, 4, 4]
-            "RT_cond_np": camera_pose_cond.numpy(),  # [N, 4, 4] # NumPy version to avoid implicit type casting
+            #"RT_cond_np": camera_pose_cond.numpy(),  # [N, 4, 4] # NumPy version to avoid implicit type casting
             "camera_intrinsics_cond": camera_intrinsics_cond,  # [N, 3, 3], non-NDC
             # Text Condition
             "caption": caption, # str
@@ -406,7 +406,7 @@ class RealEstate10K(Dataset):
                                 clip_range: Tuple[int,int], 
                                 video_length: int,
                                 offset: int = 0,
-                                stride_corrected: bool = True):
+                                stride_corrected: bool = False):
         """
         Compute indices for additional conditioning frames (N) according to a strategy.
 
@@ -443,6 +443,9 @@ class RealEstate10K(Dataset):
         elif strategy == "last":
             stride_corrected = False
             potential_indices = np.array([clip_range[-1]+offset])
+        elif strategy == "last_2":
+            stride_corrected = False
+            potential_indices = np.array([min(clip_range[-1]+2, video_length-1)])
         elif strategy == "furthest_distance":
             stride_corrected = False
             dist_front = clip_range[0]
@@ -619,8 +622,12 @@ class RealEstate10K(Dataset):
           placeholders set to `None` are inserted after collate for consistent keys.
         """
         #import ipdb; ipdb.set_trace()
-        if self.additional_cond_frames != 'none' and isinstance(self.num_additional_cond_frames, list):
-            num_cond_frames = random.randint(self.num_additional_cond_frames[0], self.num_additional_cond_frames[1])
+        if self.additional_cond_frames != 'none':
+            if isinstance(self.num_additional_cond_frames, list):
+                num_cond_frames = random.randint(self.num_additional_cond_frames[0], self.num_additional_cond_frames[1])
+            else:
+                num_cond_frames = self.num_additional_cond_frames
+            #import ipdb; ipdb.set_trace()
             if num_cond_frames > 0:
                 min_num_cond_frames = np.min([s['cond_frames'].shape[0] for s in batch])
                 num_cond_frames = min(num_cond_frames, min_num_cond_frames)
@@ -647,6 +654,7 @@ class RealEstate10K(Dataset):
                     del sample['confidence_maps_cond']
                     del sample['RT_depth_cond']
 
+
         # Drop optional keys that are globally unavailable
         for sample in batch:
             for key in self._none_keys:
@@ -655,7 +663,7 @@ class RealEstate10K(Dataset):
         
         # Default PyTorch collation for the remaining keys
         data = default_collate(batch)
-
+        #import ipdb; ipdb.set_trace()
 
         # Reinsert placeholders for missing optional branches to keep a stable dict API
         for key in self._none_keys:
@@ -1004,7 +1012,7 @@ if __name__ == "__main__":
         condition_frames = []
         depths = []
         depths_cond = []
-        import ipdb; ipdb.set_trace()
+        #import ipdb; ipdb.set_trace()
         for j in range(B):
             video = Video.fromArray(batch['video'][j], "CTHW", name="Ground Truth")
             condition_frame = Video.fromArray(batch['cond_frames'][j], "TCHW", name="Conditioning Frames")

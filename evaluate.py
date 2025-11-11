@@ -39,6 +39,9 @@ if __name__ == "__main__":
     parser.add_argument("--schedule", action="store_true", help="Schedule the evaluation via SLURM instead of running directly")
     parser.add_argument("--num_gpus", type=int, default=1, help="Number of GPUs to use for evaluation")
     parser.add_argument("--dependency", type=str, default=None, help="SLURM job dependency (e.g., afterok:12345)")
+    parser.add_argument("--cfg-scale", type=float, default=7.5, help="CFG scale")
+    parser.add_argument("--condition_strategy", type=str, default="random_outside", choices=["reference", "random_full", "random_outside", "random_front", "random_back", "last", "last_2", "furthest_distance"])
+    parser.add_argument("--num_condition", type=int, default=None)
     args = parser.parse_args()
 
     # Handle SLURM scheduling
@@ -79,7 +82,7 @@ if __name__ == "__main__":
             #SBATCH --mem-per-cpu={exp_config.get('mem_per_cpu', 8)}G
             #SBATCH --nodes=1
             #SBATCH --gpus={args.num_gpus}
-            #SBATCH --time=02:00:00
+            #SBATCH --time=03:00:00
         """)
         
         if args.machine == "marvin": 
@@ -161,7 +164,11 @@ if __name__ == "__main__":
     
     exp_config["experiment_directory"] = Path(exp_config["experiment_directory"]) / args.model
 
-    dataset_args = {"frame_stride": 6}
+    dataset_args = {
+        "frame_stride": 6,
+        "num_additional_cond_frames": [1,4] if args.num_condition is None else args.num_condition,
+        "additional_cond_frames": args.condition_strategy
+    }
     if args.sample_file is not None:
         dataset_args["meta_list"] = args.sample_file
     dataset = get_realestate10k(args.machine, depth_dataset=True, **dataset_args)
@@ -241,26 +248,25 @@ if __name__ == "__main__":
         width = 256, height = 256
     )
     # Register SIGINT handler to evaluate partial results on rank 0
-    def _handle_sigint(signum, frame):
-        try:
-            if rank == 0:
-                print(colored("SIGINT received. Evaluating existing outputs before exit...", "yellow"))
-                demo_model.evaluate(args.output)
-        except SystemExit:
-            # evaluation already exited the process
-            raise
-        except Exception as e:
-            if rank == 0:
-                print(colored(f"Evaluation on SIGINT failed: {e}", "red"))
-        finally:
-            if distributed:
-                try:
-                    dist.destroy_process_group()
-                except Exception:
-                    pass
-            sys.exit(0)
-
-    signal.signal(signal.SIGINT, _handle_sigint)
+    #def _handle_sigint(signum, frame):
+    #    try:
+    #        if rank == 0:
+    #            print(colored("SIGINT received. Evaluating existing outputs before exit...", "yellow"))
+    #            demo_model.evaluate(args.output)
+    #    except SystemExit:
+    #        # evaluation already exited the process
+    #        raise
+    #    except Exception as e:
+    #        if rank == 0:
+    #            print(colored(f"Evaluation on SIGINT failed: {e}", "red"))
+    #    finally:
+    #        if distributed:
+    #            try:
+    #                dist.destroy_process_group()
+    #            except Exception:
+    #                pass
+    #        sys.exit(0)
+    #signal.signal(signal.SIGINT, _handle_sigint)
 
     # Every rank creates its output dir (for saving its own results)
     args.output.mkdir(parents=True, exist_ok=True)
@@ -278,6 +284,7 @@ if __name__ == "__main__":
         if rank == 0:
             print(colored(f"Processing batch {i+1}/{num_batches}", "light_cyan"))
 
+        #import ipdb; ipdb.set_trace()
         demo_model.generate(
             video = rearrange(batch['video'], "B C T H W -> B T C H W"), # [B, T, C, H, W]
             extrinsics = batch['RT'], # [B, T, 4, 4]
@@ -294,6 +301,7 @@ if __name__ == "__main__":
             frame_stride = batch["frame_stride"],
             caption = batch['caption'],
             video_path = batch['video_path'],
+            cfg_scale=args.cfg_scale,
             output_dir=args.output,
             enable_camera_condition=args.model != "dynamicrafter"
         )
@@ -313,5 +321,5 @@ if __name__ == "__main__":
         dist.destroy_process_group()
 
     # Run evaluation only on rank 0 after the run completes
-    if rank == 0:
-        demo_model.evaluate(args.output)
+    #if rank == 0:
+    #    demo_model.evaluate(args.output)

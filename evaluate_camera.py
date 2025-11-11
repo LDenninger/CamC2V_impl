@@ -71,7 +71,7 @@ CAMERA_MODEL_NAMES = dict([(camera_model.model_name, camera_model)
 def camera_pose_evaluation(eval_paths,
                             output,
                             thread_id: int = 0,
-                            use_colmap=False,
+                            use_colmap=True,
                             trials_per_video: int = 1,
                             trial_strategy: Literal["average", "best"] = "average",
                             ) -> Tuple[dict, list, list, list]:
@@ -88,7 +88,7 @@ def camera_pose_evaluation(eval_paths,
     
     for i, p in tqdm(enumerate(eval_paths), total=len(eval_paths), desc=f"Thread {thread_id}"):
         cam_data_file = Path(p) / "camera_params.npz"
-        video_file = Path(p) / "raw" /"generated.mp4"
+        video_file = Path(p) / "raw" /"ground_truth.mp4"
         if not cam_data_file.exists():
             print(f"Thread {thread_id}: Could not find camera data for {Path(p).stem}. Skipping...")
             continue
@@ -182,21 +182,23 @@ def compute_camera_poses(img_dir: str, pose_dir: str, f: float, cx: float, cy: f
             "ImageReader.single_camera": 1,
             "ImageReader.camera_model": "SIMPLE_PINHOLE",
             "ImageReader.camera_params": f"{f},{cx},{cy}",
-            "SiftExtraction.estimate_affine_shape": 1,
-            "SiftExtraction.domain_size_pooling": 1,
+            #"SiftExtraction.estimate_affine_shape": 1,
+            #"SiftExtraction.domain_size_pooling": 1,
         },
         "sequential_matcher": {
             "database_path": db_path,
             "SiftMatching.guided_matching": 1,
             "SiftMatching.max_num_matches": 65536,
+            "SiftMatching.use_gpu": 1
         },
         "mapper": {
             "database_path": db_path,
             "image_path": img_dir,
             "output_path": model_dir,
-            "output_format": "txt",
-            "RelPoseEstimation.max_epipolar_error": 4,
-            "BundleAdjustment.optimize_intrinsics": 0,
+            "Mapper.init_min_num_inliers": 20
+            #"output_format": "txt",
+            #"RelPoseEstimation.max_epipolar_error": 4,
+            #"BundleAdjustment.optimize_intrinsics": 0,
         },
     }
 
@@ -204,9 +206,11 @@ def compute_camera_poses(img_dir: str, pose_dir: str, f: float, cx: float, cy: f
         return None
     if not run_command(["colmap", "sequential_matcher"] + convert(config["sequential_matcher"])):
         return None
+    
     if not run_command(["glomap" if not use_colmap else "colmap", "mapper"] + convert(config["mapper"])):
         return None
 
+    import ipdb; ipdb.set_trace()
     write_depth_pose_from_colmap_format(f"{model_dir}/0", model_dir, ext=".txt")
 
     w2c = rt34_to_44(get_rt(f"{model_dir}/poses"))

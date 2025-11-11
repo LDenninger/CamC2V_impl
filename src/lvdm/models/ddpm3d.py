@@ -827,9 +827,9 @@ class LatentDiffusion(DDPM):
                     unconditional_guidance_scale=1.0, **kwargs):
         """ log images for LatentDiffusion """
         ##### control sampled imgae for logging, larger value may cause OOM
-        sampled_img_num = 2
-        for key in batch.keys():
-            batch[key] = batch[key][:sampled_img_num]
+        #sampled_img_num = 2
+        #for key in batch.keys():
+        #    batch[key] = batch[key][:sampled_img_num]
 
         ## TBD: currently, classifier_free_guidance sampling is only supported by DDIM
         use_ddim = ddim_steps is not None
@@ -1133,9 +1133,9 @@ class LatentVisualDiffusion(LatentDiffusion):
                     unconditional_guidance_scale=1.0, mask=None, **kwargs):
         """ log images for LatentVisualDiffusion """
         ##### sampled_img_num: control sampled imgae for logging, larger value may cause OOM
-        sampled_img_num = 1
-        for key in batch.keys():
-            batch[key] = batch[key][:sampled_img_num]
+        #sampled_img_num = 1
+        #for key in batch.keys():
+        #    batch[key] = batch[key][:sampled_img_num]
 
         ## TBD: currently, classifier_free_guidance sampling is only supported by DDIM
         use_ddim = ddim_steps is not None

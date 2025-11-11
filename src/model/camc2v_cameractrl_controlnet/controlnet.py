@@ -609,9 +609,10 @@ class ContextEncoder(nn.Module):
             context_add=None,
             features_adapter=None,
             fs=None,
+            strength: float = 1.0,
             **kwargs):
 
-        return checkpoint(self._forward, (x, condition, timesteps, mask, context, context_add, features_adapter, fs), self.parameters(), self.activation_ckpt)
+        return checkpoint(self._forward, (x, condition, timesteps, mask, context, context_add, features_adapter, fs, strength), self.parameters(), self.activation_ckpt)
 
     def _forward(self, 
                 x, 
@@ -622,6 +623,7 @@ class ContextEncoder(nn.Module):
                 context_add=None,
                 features_adapter=None,
                 fs=None,
+                strength: float = 1.0,
                 **kwargs):
         """
         Encoder forward.
@@ -689,6 +691,7 @@ class ContextEncoder(nn.Module):
             if ((block_id + 1) % 3 == 0) and features_adapter is not None:
                 h = h + features_adapter[adapter_idx]
                 adapter_idx += 1
+            h *= strength
             hs.append(h)
         if features_adapter is not None:
             assert len(features_adapter) == adapter_idx, 'Wrong features_adapter'
@@ -696,6 +699,7 @@ class ContextEncoder(nn.Module):
         # middle block
         if self.middle_block is not None:
             h_enc = self.middle_block(h, emb, context=context, batch_size=b)
+            h_enc *= strength
             hs.append(h_enc)
         # NOTE: keep (b*t, c, h, w) layout to match original decoder expectations.
         if self.zero_convolutions is not None:

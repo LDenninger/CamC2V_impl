@@ -1,4 +1,3 @@
-python evaluate_existing.py -p /home/denninge/jureca/src/CamC2V/output/camc2v_camctrl_ctrlnet_crossattn03_step_30000_sample_long_videos_1000
 python evaluate_existing.py -p /home/denninge/jureca/src/CamC2V/output/camc2v_camctrl_ctrlnet03_step_30000_sample_long_videos_1000
 python evaluate_existing.py -p /home/denninge/jureca/src/CamC2V/output/camc2v_camera_ctrl_controlnet_conf_step_20000_sample_long_videos_1000
 python evaluate_existing.py -p /home/denninge/jureca/src/CamC2V/output/dynamicrafter_step_None_sample_long_videos_1000

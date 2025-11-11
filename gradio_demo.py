@@ -11,9 +11,17 @@ import traceback
 
 from einops import rearrange
 from VidUtil import Video
+from VidUtil.debug import inspect
 
 from src.demo.camc2v_demo import CamC2VDemo
 from src.data import get_realestate10k
+
+from termcolor import colored
+
+# Good examples:
+# 5dbd501fca3ef5c4
+# eaffbdd81f80a5ea
+# 33f7565ccb685cb7
 
 def get_models(path: Path) -> tuple[list[Path], dict]:
     dirs = [d for d in path.iterdir() if d.is_dir()]
@@ -55,28 +63,32 @@ def sample_batch(
         print("Warning: selected indices exceed video length. Adjusting to fit within bounds.")
         return None
     
-    batch["cond_frames"] = batch["video"][:, condition_indices, :, :]
+    batch["cond_frames"] = rearrange(batch["video"][:, condition_indices, :, :], "C T H W -> T C H W")
     batch["RT_cond"] = batch["RT"][condition_indices, :, :]
     batch["camera_intrinsics_cond"] = batch["camera_intrinsics"][condition_indices, :, :]
-    if "depth_maps" in batch:
+    if "depth_maps" in batch and batch["depth_maps"] is not None:
         batch["depth_maps_cond"] = batch["depth_maps"][condition_indices, ...]
-    if "RT_depth" in batch:
+    if "RT_depth" in batch and batch["RT_depth"] is not None:
         batch["RT_depth_cond"] = batch["RT_depth"][condition_indices, :, :]
         batch["camera_intrinsics_depth_cond"] = batch["camera_intrinsics_depth"][condition_indices, :, :]
 
     batch["video"] = batch["video"][:, selected_indices, :, :]
     batch["RT"] = batch["RT"][selected_indices, :, :]
     batch["camera_intrinsics"] = batch["camera_intrinsics"][selected_indices, :, :]
-    batch["depth_maps"] = batch["depth_maps"][selected_indices, ...]
-    if "RT_depth" in batch:
+    if "depth_maps" in batch and batch["depth_maps"] is not None:
+        batch["depth_maps"] = batch["depth_maps"][selected_indices, ...]
+    if "RT_depth" in batch and batch["RT_depth"] is not None:
         batch["RT_depth"] = batch["RT_depth"][selected_indices, :, :]
         batch["camera_intrinsics_depth"] = batch["camera_intrinsics_depth"][selected_indices,...]
-    batch["frame_stride"] = frame_stride
+
+    batch["caption"] = [batch["caption"]]
 
     if add_batch_dim:
         for k in batch.keys():
             if isinstance(batch[k], torch.Tensor):
                 batch[k] = batch[k].unsqueeze(0)  # Add batch dimension
+
+    batch["frame_stride"] = 6*torch.ones(1).to(dtype=torch.int64)
     return batch
 
 
@@ -95,9 +107,13 @@ def gradio_app(path: Path, machine: str, output: Path):
         model_name = model_path.name
         ckpt_choices[model_name] = list(ckpts.keys())
 
-    demo = CamC2VDemo()
+    
+    demo_models = {}
 
-    dataset = get_realestate10k(machine, frame_stride=1, video_length=-1)
+    demo_model1 = None
+    demo_model2 = None
+
+    dataset = get_realestate10k(machine, frame_stride=6, video_length=-1)
 
     video_names = [Path(p).stem for p in dataset.video_names]
 
@@ -118,33 +134,40 @@ def gradio_app(path: Path, machine: str, output: Path):
                 label="Select Condition Frames", 
                 info="Select frames by index"
             )
-        
         with gr.Row():
-            model_dropdown = gr.Dropdown(label="Model", elem_id='model_dd', choices=list(model_map.keys()))
-            ckpt_dropdown = gr.Dropdown(label="Checkpoint", elem_id='ckpt_dd', choices=[])
-        with gr.Row():
-            load_btn = gr.Button("Load Model")
-        with gr.Row():
-            gen_btn = gr.Button("Generate")
-        with gr.Row():
-            gt_video = gr.Video(label="Ground Truth Video", elem_id="gt_vid", interactive=False, autoplay=True, loop=True)
-            gen_vid = gr.Video(label="Generated Video", elem_id="gen_vid", interactive=False, autoplay=True, loop=True)
-        
-        with gr.Row():
+            with gr.Column():
+                gt_video = gr.Video(label="Ground Truth Video", elem_id="gt_vid", interactive=False, autoplay=True, loop=True)
             with gr.Column():
                 trace_extract_ratio = gr.Slider(minimum=0, maximum=1.0, step=0.1, elem_id="trace_extract_ratio", label="Trace Extract Ratio", value=0.1)
                 trace_scale_factor = gr.Slider(minimum=0, maximum=5, step=0.1, elem_id="trace_scale_factor", label="Camera Trace Scale Factor", value=1.0)
                 auto_reg_steps = gr.Slider(minimum=0, maximum=10, step=1, elem_id="auto_reg_steps", label="Auto-regressive Steps", value=0)
-
-            with gr.Column():
                 enable_camera_condition = gr.Checkbox(label='Enable Camera Condition', elem_id="enable_camera_condition", value=True)
                 camera_cfg = gr.Slider(minimum=1.0, maximum=4.0, step=0.1, elem_id="Camera CFG", label="Camera CFG", value=1.0, visible=False)
                 cfg_scale = gr.Slider(minimum=1.0, maximum=15.0, step=0.5, label='CFG Scale', value=3.5, elem_id="cfg_scale")
-                frame_stride = gr.Slider(minimum=1, maximum=10, step=1, label='Frame Stride', value=2, elem_id="frame_stride")
+                frame_stride = gr.Slider(minimum=1, maximum=10, step=1, label='Frame Stride', value=1, elem_id="frame_stride")
                 steps = gr.Slider(minimum=1, maximum=250, step=1, elem_id="steps", label="Sampling Steps (DDPM)", value=25)
                 seed = gr.Slider(label="Random Seed", minimum=0, maximum=2**31, step=1, value=12333)
+        with gr.Row():
+            with gr.Column():
+                model_dropdown1 = gr.Dropdown(label="Model", elem_id='model_dd', choices=list(model_map.keys()))
+                ckpt_dropdown1 = gr.Dropdown(label="Checkpoint", elem_id='ckpt_dd', choices=[])
+                load_btn1 = gr.Button("Load Model")
+                gen_btn1 = gr.Button("Generate")
+                gen_vid1 = gr.Video(label="Generated Video", elem_id="gen_vid", interactive=False, autoplay=True, loop=True)
+
+            with gr.Column():
+                model_dropdown2 = gr.Dropdown(label="Model", elem_id='model_dd', choices=list(model_map.keys()))
+                ckpt_dropdown2 = gr.Dropdown(label="Checkpoint", elem_id='ckpt_dd', choices=[])
+                load_btn2 = gr.Button("Load Model")
+                gen_btn2 = gr.Button("Generate")
+                gen_vid2 = gr.Video(label="Generated Video", elem_id="gen_vid", interactive=False, autoplay=True, loop=True)
+
 
         ## Callback functions
+        def generate1(*args, **kwargs):
+            return generate(*args, demo_id=0, **kwargs)
+        def generate2(*args, **kwargs):
+            return generate(*args, demo_id=0, **kwargs)
         def generate(
             model_name: str,
             reference_indices: list[str],  # Changed from reference_index
@@ -160,21 +183,28 @@ def gradio_app(path: Path, machine: str, output: Path):
             steps: int,
             seed: int,
 
+            demo_id: int = 0
+
         ):
             if not model_name or not video_name:
                 return None
+            
                 
             if not reference_indices or len(reference_indices) != 1:
-                print("Please select exactly one reference frame")
-                return None
+                reference_index = 0
+            else:
+                reference_index = int(reference_indices[0])
+            
+            if demo_id == 0:
+                demo = demo_model1
+            else:
+                demo = demo_model2
                 
             try:
-                reference_index = int(reference_indices[0])
                 cond_indices = [int(idx) for idx in cond_frame_indices] if cond_frame_indices else []
                 
                 index = dataset.get_index_by_name(video_name)
                 batch = dataset[index]
-                import ipdb; ipdb.set_trace()
                 batch = sample_batch(
                     batch,
                     frame_stride=frame_stride,
@@ -190,6 +220,7 @@ def gradio_app(path: Path, machine: str, output: Path):
                 output_path = output / model_name / video_name
                 output_path.mkdir(parents=True, exist_ok=True)
 
+                demo.to("cuda")
                 demo.generate(
                     video = rearrange(batch['video'], "B C T H W -> B T C H W"), # [B, T, C, H, W]
                     extrinsics = batch['RT'], # [B, T, 4, 4]
@@ -213,6 +244,7 @@ def gradio_app(path: Path, machine: str, output: Path):
                     seed=seed,
                     enable_camera_condition=enable_camera_condition
                 )
+                demo.to("cpu")
 
                 gt_path = output_path / "raw" / "ground_truth.mp4"
                 gen_path = output_path / "raw" / "generated.mp4"
@@ -224,18 +256,41 @@ def gradio_app(path: Path, machine: str, output: Path):
                 traceback.print_exc()
                 return None, None
 
-        def load_model(model_name: str, checkpoint: str):
+        def load_model1(model_name: str, checkpoint: str):
+            return load_model(model_name, checkpoint, demo_id=0)
+        
+        def load_model2(model_name: str, checkpoint: str):
+            return load_model(model_name, checkpoint, demo_id=1)
+        
+        def load_model(model_name: str, checkpoint: str, demo_id: int = 0):
+            nonlocal demo_model1, demo_model2
             print(f"Loading model '{model_name}' with checkpoint '{checkpoint}'")
-            config_path = model_map[model_name] / "config.yaml"
-            width, height = 256, 256
-            ckpt_path = checkpoint_map[model_map[model_name]][checkpoint]
 
+            model_ckpt_name = f"{model_name}_{checkpoint}"
+            if model_ckpt_name in demo_models:
+                print(f"{model_ckpt_name} already in cache, reusing.")
+                return
+            config_path = model_map[model_name] / "config.yaml"
+            print(f" -> Using model config: {config_path}")
+            width, height = 256, 256
+            if checkpoint is not None:
+                ckpt_path = checkpoint_map[model_map[model_name]][checkpoint]
+            else:
+                ckpt_path = None
+            print(f" -> Using checkpoint path: {ckpt_path}")
+            demo = CamC2VDemo()
             demo.load_model(
                 config_file = config_path,
                 width = width, height = height,
-                ckpt_path = ckpt_path
+                ckpt_path = ckpt_path,
+                device='cpu'
             )
-            print("Successfully loaded the model")
+            demo_models[model_ckpt_name] = demo
+            if demo_id == 0:
+                demo_model1 = demo
+            else:
+                demo_model2 = demo
+            print(colored("Successfully loaded the model!", "green"))
         
         def update_ckpt_dropdown(model_name: str) -> list:
             if model_name and model_name in ckpt_choices:
@@ -304,20 +359,35 @@ def gradio_app(path: Path, machine: str, output: Path):
             inputs=[video_dropdown],
             outputs=[frame_gallery, reference_selector, frame_selector]
         )
-        model_dropdown.change(
+        model_dropdown1.change(
             fn = update_ckpt_dropdown,
-            inputs=[model_dropdown],
-            outputs=[ckpt_dropdown]
+            inputs=[model_dropdown1],
+            outputs=[ckpt_dropdown1]
         )
-        load_btn.click(
-            fn = load_model,
-            inputs=[model_dropdown, ckpt_dropdown],
+        model_dropdown2.change(
+            fn = update_ckpt_dropdown,
+            inputs=[model_dropdown2],
+            outputs=[ckpt_dropdown2]
+        )
+        load_btn1.click(
+            fn = load_model1,
+            inputs=[model_dropdown1, ckpt_dropdown1],
             outputs=[]
         )
-        gen_btn.click(
-            fn = generate,
-            inputs=[model_dropdown, reference_selector, frame_selector, video_dropdown, trace_extract_ratio, trace_scale_factor, auto_reg_steps, enable_camera_condition, cfg_scale, frame_stride, steps, seed],
-            outputs = [gt_video, gen_vid],
+        load_btn2.click(
+            fn = load_model2,
+            inputs=[model_dropdown2, ckpt_dropdown2],
+            outputs=[]
+        )
+        gen_btn1.click(
+            fn = generate1,
+            inputs=[model_dropdown1, reference_selector, frame_selector, video_dropdown, trace_extract_ratio, trace_scale_factor, auto_reg_steps, enable_camera_condition, cfg_scale, frame_stride, steps, seed],
+            outputs = [gt_video, gen_vid1],
+        )
+        gen_btn2.click(
+            fn = generate2,
+            inputs=[model_dropdown2, reference_selector, frame_selector, video_dropdown, trace_extract_ratio, trace_scale_factor, auto_reg_steps, enable_camera_condition, cfg_scale, frame_stride, steps, seed],
+            outputs = [gt_video, gen_vid2],
         )
 
     return app

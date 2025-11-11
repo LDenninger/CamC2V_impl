@@ -210,7 +210,7 @@ class CamC2VDemo:
         print(table_str)
         sys.exit(0)
 
-    def _save(self, batch: dict, output: dict, output_dir: str):
+    def _save(self, batch: dict, output: dict, output_dir: str, encoding: str = "mp4v"):
         #import ipdb; ipdb.set_trace()
         B = batch["video"].shape[0]
         for b in range(B):
@@ -218,6 +218,8 @@ class CamC2VDemo:
             video_name = Path(batch['video_path'][b]).stem
             save_dir = Path(output_dir) / video_name
             raw_save_dir = save_dir / "raw"
+            condition_save_dir = save_dir / "condition_frames"
+            condition_save_dir.mkdir(parents=True, exist_ok=True)
             save_dir.mkdir(parents=True, exist_ok=True)
             raw_save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -233,17 +235,18 @@ class CamC2VDemo:
 
             video_save = hcat(video_save)
 
-            frames_condition = torch.cat([batch["video"][b,:, 2].unsqueeze(0), batch["cond_frames"][b]])
+            frames_condition = torch.cat([batch["video"][b,:,0].unsqueeze(0), batch["cond_frames"][b]])
             frames_condition = Video.fromArray(frames_condition, "TCHW", name="Condition Frames")
+            frames_condition.save_frames(condition_save_dir / "condition_frames")
 
-            frames_condition.grid('horizontal', file=save_dir / "condition_frames.png")
+            #frames_condition.grid('horizontal', file=save_dir / "condition_frames.png")
             video_save.save(save_dir / "video.mp4", fps=5)
 
-            video_gt.save(raw_save_dir / "ground_truth.mp4", fps=7)
-            video_reconst.save(raw_save_dir / "reconstruction.mp4", fps=7)
+            video_gt.save(raw_save_dir / "ground_truth.mp4", fps=7, encoding=encoding)
+            video_reconst.save(raw_save_dir / "reconstruction.mp4", fps=7, encoding=encoding)
             if "cache3d_rendering" in output and output["cache3d_rendering"] is not None:
-                video_cache3d.save(raw_save_dir / "cache3d_rendering.mp4", fps=7)
-            video_generated.save(raw_save_dir / "generated.mp4", fps=7)
+                video_cache3d.save(raw_save_dir / "cache3d_rendering.mp4", fps=7, encoding=encoding)
+            video_generated.save(raw_save_dir / "generated.mp4", fps=7, encoding=encoding)
 
             caption = str(batch["caption"][b])
             with open(save_dir / "caption.txt", "w") as f:
@@ -258,7 +261,7 @@ class CamC2VDemo:
             np.savez(save_dir / "camera_params.npz", **camera_dict)
         
     
-    def load_model(self, config_file: str, width: int, height: int, ckpt_path: str = None):
+    def load_model(self, config_file: str, width: int, height: int, ckpt_path: str = None, device:str="cuda"):
         config = OmegaConf.load(config_file)
         config.model.params.perframe_ae = True
         model = instantiate_from_config(config.model)
@@ -292,12 +295,17 @@ class CamC2VDemo:
         else:
             pretrained_ckpt = config.model.pretrained_checkpoint
             pl_sd = torch.load(pretrained_ckpt, map_location="cpu", weights_only=True)
-            model.load_state_dict(pl_sd["state_dict"], strict=False)
+            if "state_dict" in pl_sd:
+                model.load_state_dict(pl_sd["state_dict"], strict=False)
+            else:
+                model.load_state_dict(pl_sd, strict=False)
             print(f"successfully loaded pretrained weights from {pretrained_ckpt}")
 
 
 
         #model.uncond_type = "negative_prompt"
         model = model.to(dtype=torch.float32)
-        self._model = model.to("cuda")
+        self._model = model.to(device)
 
+    def to(self, device: str):
+        self._model = self._model.to(device)

@@ -5,6 +5,23 @@ import torch
 import torch.distributed as dist
 
 
+def human_readable_number(num):
+    # List of suffixes in increasing powers of ten
+    suffixes = ['','K','M','B','T','P','E']
+    
+    # If the number is less than 1000, return it as is
+    if abs(num) < 1000:
+        return str(num)
+    
+    # Determine the order of magnitude
+    magnitude = 0
+    while abs(num) >= 1000:
+        num /= 1000.0
+        magnitude += 1
+    
+    # Format the number with the appropriate suffix
+    return f"{num:.2f}{suffixes[magnitude]}"
+
 def count_params(model, verbose=False):
     total_params = sum(p.numel() for p in model.parameters())
     if verbose:
